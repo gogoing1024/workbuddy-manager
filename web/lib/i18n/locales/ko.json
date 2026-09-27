@@ -162,6 +162,9 @@
     "description": "{realm} 계정 풀 상태, 게이트웨이, 오늘 사용량 요약 (30초마다 자동 새로고침)",
     "totalAccounts": "전체 계정",
     "totalAccountsHint": "{realm} 관리 중",
+    "scopeAllGroups": "집계 범위: 전체 그룹({n}개) · 그룹별 상세는 「계정」 페이지",
+    "groupsPartial": "{n}개 그룹의 계정을 불러오지 못했습니다. 아래 수치에 포함되지 않았습니다",
+    "accountsLoadFailed": "계정 데이터를 불러오지 못했습니다",
     "valid": "유효 기간 내",
     "allOk": "모두 정상",
     "abnormal": "{n}개 이상",
@@ -376,7 +379,10 @@
     "groupDelete": "그룹 삭제",
     "groupDeleteTitle": "그룹 \"{name}\" 삭제",
     "groupDeleteDesc": "패널의 그룹 기록만 삭제됩니다——계정 디렉터리와 파일은 그대로 남습니다. 그룹에 계정이 남아 있거나 키가 연결되어 있으면 삭제가 거부됩니다(오류에 개수가 표시되니 먼저 정리하세요).",
-    "groupDeleted": "그룹을 삭제했습니다"
+    "groupDeleted": "그룹을 삭제했습니다",
+    "sharedInstanceTitle": "이 그룹은 기본 그룹과 같은 업스트림 인스턴스를 공유합니다",
+    "sharedInstanceHint": "이 그룹의 계정 파일은 패널이 따로 관리하지만, 업스트림은 기본 그룹의 디렉터리만 읽습니다. 그래서 여기에 넣은 계정(이 그룹에서 QR로 새로 추가한 계정 포함)은 계속 “미로드”로 표시되고, 포워딩과 체크인에도 사용되지 않습니다. 풀을 실제로 분리하려면 서버에 workbuddy2api를 하나 더 배포하고 이 그룹의 업스트림 주소를 그 인스턴스로 바꾸세요.",
+    "sharedInstanceAction": "설정 → 업스트림에서 주소 변경"
   },
   "keys": {
     "title": "API 키",
@@ -648,7 +654,9 @@
     "reasonModelNotAllowed": "모델이 키 허용 목록에 없습니다",
     "accessLogScope": "차단된 요청만 기록합니다. 허용된 호출은 요청 로그 페이지에서 볼 수 있습니다",
     "deleteRuleTitle": "이 IP 규칙을 삭제할까요?",
-    "deleteRuleDesc": "삭제하면 즉시 적용됩니다: 해당 대역은 더 이상 이 규칙의 적용을 받지 않습니다(허용과 차단 모두 해제됩니다)."
+    "deleteRuleDesc": "삭제하면 즉시 적용됩니다: 해당 대역은 더 이상 이 규칙의 적용을 받지 않습니다(허용과 차단 모두 해제됩니다).",
+    "partialLoadFailed": "일부 데이터를 불러오지 못했습니다",
+    "notLoaded": "불러오지 못했습니다"
   },
   "models": {
     "title": "모델",
@@ -824,6 +832,8 @@
     "sourceAdd": "계정 추가",
     "sourceAuto": "업스트림 자동",
     "checkinEmpty": "출석 기록이 없습니다. 계정 페이지의 '전체 출석' 또는 개별 계정의 🎁 버튼을 사용하면 여기에 기록됩니다.",
+    "checkinLoadFailed": "출석 기록을 불러오지 못했습니다",
+    "taskLogLoadFailed": "자동 작업 기록을 불러오지 못했습니다",
     "rawLogTitle": "업스트림 원본 로그",
     "rawLogSubtitle": "(출석 / 연결 유지 / 여행 / 활동)",
     "rawLogFrom": "컨테이너 로그에서",

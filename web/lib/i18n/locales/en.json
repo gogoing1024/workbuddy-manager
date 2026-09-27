@@ -183,6 +183,9 @@
     "description": "{realm} pool health, gateway status and today's usage (auto-refresh every 30s)",
     "totalAccounts": "Total accounts",
     "totalAccountsHint": "{realm} managed",
+    "scopeAllGroups": "Scope: all groups ({n} total) · per-group detail on the Accounts page",
+    "groupsPartial": "Could not load accounts from {n} group(s); the figures below exclude them",
+    "accountsLoadFailed": "Account data failed to load",
     "valid": "Valid tokens",
     "allOk": "All healthy",
     "abnormal": {
@@ -400,7 +403,10 @@
     "groupDelete": "Delete group",
     "groupDeleteTitle": "Delete group \"{name}\"",
     "groupDeleteDesc": "Only the group record in this panel is deleted — the account directory and its files stay. Deletion is refused while the group still has accounts or bound keys (the error tells you how many; clear them first).",
-    "groupDeleted": "Group deleted"
+    "groupDeleted": "Group deleted",
+    "sharedInstanceTitle": "This group shares the same upstream instance as the default group",
+    "sharedInstanceHint": "This group’s account files are managed by the panel on their own, but the upstream only reads the default group’s directory — so any account placed here (including ones you add by QR in this group) will keep showing “not loaded”, and will not be used for forwarding or check-in. To truly separate the pools, deploy a second workbuddy2api instance on your server and point this group’s upstream URL at it.",
+    "sharedInstanceAction": "Change the URL in Settings → Upstreams"
   },
   "keys": {
     "title": "API keys",
@@ -672,7 +678,9 @@
     "reasonModelNotAllowed": "model not in the key's allowlist",
     "accessLogScope": "Only blocked requests are recorded; allowed calls appear in Request logs",
     "deleteRuleTitle": "Delete this IP rule?",
-    "deleteRuleDesc": "Takes effect immediately — the network stops matching this rule, whether it allowed or blocked."
+    "deleteRuleDesc": "Takes effect immediately — the network stops matching this rule, whether it allowed or blocked.",
+    "partialLoadFailed": "Some data failed to load",
+    "notLoaded": "Not loaded"
   },
   "models": {
     "title": "Models",
@@ -848,6 +856,8 @@
     "sourceAdd": "Add account",
     "sourceAuto": "Upstream auto",
     "checkinEmpty": "No check-in records yet. Using Check in all on the Accounts page, or the 🎁 button of a single account, leaves a record here.",
+    "checkinLoadFailed": "Check-in records failed to load",
+    "taskLogLoadFailed": "Automatic task records failed to load",
     "rawLogTitle": "Upstream raw logs",
     "rawLogSubtitle": "(check-in / keep-alive / travel / activity)",
     "rawLogFrom": "From container logs",

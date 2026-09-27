@@ -162,6 +162,9 @@
     "description": "{realm}帳號池健康度、反向代理閘道與今日用量總覽（每 30 秒自動重新整理）",
     "totalAccounts": "帳號總數",
     "totalAccountsHint": "{realm}已納管",
+    "scopeAllGroups": "統計範圍：全部分組（共 {n} 個）· 分組明細見「帳號」頁",
+    "groupsPartial": "有 {n} 個分組的帳號沒取到，下面的數字不含它們",
+    "accountsLoadFailed": "帳號資料載入失敗",
     "valid": "有效期內",
     "allOk": "全部正常",
     "abnormal": "{n} 個異常",
@@ -376,7 +379,10 @@
     "groupDelete": "刪除分組",
     "groupDeleteTitle": "刪除分組「{name}」",
     "groupDeleteDesc": "只刪除面板裡的分組記錄——帳號目錄與檔案不會被刪除。分組裡還有帳號、或有密鑰綁著它時會拒絕刪除（提示裡會給出數量，先處理再刪）。",
-    "groupDeleted": "已刪除分組"
+    "groupDeleted": "已刪除分組",
+    "sharedInstanceTitle": "這一組和預設分組共用同一套上游實例",
+    "sharedInstanceHint": "這一組的帳號檔案由面板單獨管理，而上游只讀預設分組的帳號目錄——所以放進這一組的帳號（包括在這裡新掃碼加的）都會一直顯示「未載入」，轉發與簽到也不會用到它們。要真正把帳號池分開，請在伺服器上再部署一套 workbuddy2api，再把這一組的「上游位址」改成那套實例。",
+    "sharedInstanceAction": "去「設定 → 上游」改位址"
   },
   "keys": {
     "title": "API 金鑰",
@@ -648,7 +654,9 @@
     "reasonModelNotAllowed": "模型不在密鑰白名單內",
     "accessLogScope": "僅記錄被攔截的請求；放行的呼叫見「請求日誌」頁",
     "deleteRuleTitle": "刪除這條 IP 規則？",
-    "deleteRuleDesc": "刪除後立即生效：該網段不再受這條規則約束（放行或攔截都一併取消）。"
+    "deleteRuleDesc": "刪除後立即生效：該網段不再受這條規則約束（放行或攔截都一併取消）。",
+    "partialLoadFailed": "部分資料載入失敗",
+    "notLoaded": "未取得"
   },
   "models": {
     "title": "模型中心",
@@ -824,6 +832,8 @@
     "sourceAdd": "新增帳號",
     "sourceAuto": "上游自動",
     "checkinEmpty": "暫無簽到紀錄。在「帳號管理」點「全部簽到」或單一帳號的 🎁 會在此留痕。",
+    "checkinLoadFailed": "簽到紀錄載入失敗",
+    "taskLogLoadFailed": "自動任務紀錄載入失敗",
     "rawLogTitle": "上游原始日誌",
     "rawLogSubtitle": "（簽到 / 保活 / 旅行 / 活躍）",
     "rawLogFrom": "來自容器日誌",
