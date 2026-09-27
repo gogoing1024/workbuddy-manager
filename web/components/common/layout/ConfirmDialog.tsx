@@ -66,7 +66,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
         </AlertDialogHeader>
-        {content}
+        {content && <div className="px-6">{content}</div>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>{t('common.cancel')}</AlertDialogCancel>
           <AlertDialogAction
