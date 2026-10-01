@@ -236,6 +236,7 @@
     "globalTotalsNote": "Upstream reported no per-edition counts; the numbers above combine both editions",
     "noUpstreamStatus": "Upstream status unavailable",
     "healthSnapshot": "Account health snapshot",
+    "viewAllAccounts": "View all accounts",
     "noAccounts": "No accounts yet",
     "noAccountsHint": "Use Quick add in the bottom bar to sign in a Tencent account by QR code",
     "unusable": "{n} unusable",
@@ -296,6 +297,11 @@
     "hourlyAgg": "Hourly (today)"
   },
   "accounts": {
+    "proxyLine": "Exit route",
+    "proxyDirect": "Default route",
+    "proxyMissing": "Route unavailable",
+    "proxySaved": "Exit route updated",
+
     "title": "Accounts",
     "descCn": "Tencent CodeBuddy account pool: token validity, check-in and connectivity (auto-refresh every 30s)",
     "descGlobal": "Tencent CodeBuddy account pool (Global edition): token validity and connectivity (auto-refresh every 30s)",
@@ -628,6 +634,7 @@
     "colFirstToken": "First token",
     "colAccount": "Account",
     "rowAccount": "Account",
+    "accountPending": "not captured yet (backfills automatically)",
     "colLatency": "Latency",
     "streamShort": "stream",
     "noCreditTitle": "Upstream did not return this field (not the same as free)",
@@ -1251,7 +1258,7 @@
     "errHourRange": "“{v}” is not an hour between 0 and 23",
     "errNumber": "Enter a number",
     "errRange": "Enter {min}–{max}{unit}",
-    "errDuration": "Format: 30s / 10m / 2h / 1d",
+    "errDuration": "Format: 30s / 10m / 2h (d is not supported)",
     "errNoNewline": "Line breaks and control characters are not allowed",
     "errHourFormat": "Invalid hour format",
     "errEnum": "Value is outside the allowed range",

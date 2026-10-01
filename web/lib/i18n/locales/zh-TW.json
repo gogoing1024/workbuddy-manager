@@ -212,6 +212,7 @@
     "globalTotalsNote": "上游未提供分版本計數，以上為兩個版本合計",
     "noUpstreamStatus": "未取得上游狀態",
     "healthSnapshot": "帳號健康快照",
+    "viewAllAccounts": "查看全部帳號",
     "noAccounts": "暫無帳號",
     "noAccountsHint": "點擊底欄「快速新增」掃碼授權騰訊帳號",
     "unusable": "{n} 個無法使用",
@@ -272,6 +273,11 @@
     "hourlyAgg": "按小時（當日彙總）"
   },
   "accounts": {
+    "proxyLine": "出口線路",
+    "proxyDirect": "預設出口",
+    "proxyMissing": "線路已失效",
+    "proxySaved": "出口線路已更新",
+
     "title": "帳號管理",
     "descCn": "騰訊 CodeBuddy 帳號池：Token 有效期、簽到與連線測試（每 30 秒自動重新整理）",
     "descGlobal": "騰訊 CodeBuddy 帳號池（國際版）：Token 有效期與連線測試（每 30 秒自動重新整理）",
@@ -604,6 +610,7 @@
     "colFirstToken": "首字",
     "colAccount": "帳號",
     "rowAccount": "帳號",
+    "accountPending": "未擷取（稍後自動回填）",
     "colLatency": "總耗時",
     "streamShort": "串流",
     "noCreditTitle": "上游未回傳該項（不等於免費）",
@@ -1227,7 +1234,7 @@
     "errHourRange": "「{v}」不是 0-23 的整點",
     "errNumber": "請填寫數字",
     "errRange": "請填 {min}–{max}{unit}",
-    "errDuration": "格式如 30s / 10m / 2h / 1d",
+    "errDuration": "格式如 30s / 10m / 2h（不支援 d）",
     "errNoNewline": "不能包含換行或控制字元",
     "errHourFormat": "時刻格式有誤",
     "errEnum": "取值不在允許範圍內",

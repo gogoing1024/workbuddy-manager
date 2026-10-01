@@ -212,6 +212,7 @@
     "globalTotalsNote": "上游未提供分版本计数，以上为两个版本合计",
     "noUpstreamStatus": "未获取到上游状态",
     "healthSnapshot": "账号健康快照",
+    "viewAllAccounts": "查看全部账号",
     "noAccounts": "暂无账号",
     "noAccountsHint": "点击底栏「快速添加」扫码授权腾讯账号",
     "unusable": "{n} 个不可用",
@@ -272,6 +273,11 @@
     "hourlyAgg": "按小时（当日汇总）"
   },
   "accounts": {
+    "proxyLine": "出口线路",
+    "proxyDirect": "默认出口",
+    "proxyMissing": "线路已失效",
+    "proxySaved": "出口线路已更新",
+
     "title": "账号管理",
     "descCn": "腾讯 CodeBuddy 账号池：Token 有效期、签到与连通性（每 30 秒自动刷新）",
     "descGlobal": "腾讯 CodeBuddy 账号池（国际版）：Token 有效期与连通性（每 30 秒自动刷新）",
@@ -604,6 +610,7 @@
     "colFirstToken": "首字",
     "colAccount": "账号",
     "rowAccount": "账号",
+    "accountPending": "未采集（稍后自动回填）",
     "colLatency": "总耗时",
     "streamShort": "流",
     "noCreditTitle": "上游未返回该项（不等于免费）",
@@ -1227,7 +1234,7 @@
     "errHourRange": "「{v}」不是 0-23 的整点",
     "errNumber": "请填写数字",
     "errRange": "请填 {min}–{max}{unit}",
-    "errDuration": "格式如 30s / 10m / 2h / 1d",
+    "errDuration": "格式如 30s / 10m / 2h（不支持 d）",
     "errNoNewline": "不能包含换行或控制字符",
     "errHourFormat": "时刻格式有误",
     "errEnum": "取值不在允许范围内",

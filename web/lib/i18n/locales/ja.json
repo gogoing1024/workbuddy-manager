@@ -212,6 +212,7 @@
     "globalTotalsNote": "上流がエディション別の集計を返さないため、上記は 2 つのエディションの合計です",
     "noUpstreamStatus": "上流の状態を取得できませんでした",
     "healthSnapshot": "アカウント健全性スナップショット",
+    "viewAllAccounts": "すべてのアカウントを表示",
     "noAccounts": "アカウントがありません",
     "noAccountsHint": "画面下部の「クイック追加」から QR コードで Tencent アカウントを認証してください",
     "unusable": "{n} 件が使用不可",
@@ -272,6 +273,11 @@
     "hourlyAgg": "時間別（本日分）"
   },
   "accounts": {
+    "proxyLine": "送信経路",
+    "proxyDirect": "既定の経路",
+    "proxyMissing": "経路が無効です",
+    "proxySaved": "送信経路を更新しました",
+
     "title": "アカウント管理",
     "descCn": "Tencent CodeBuddy アカウントプール: Token 有効期限・チェックイン・疎通確認（30 秒ごとに自動更新）",
     "descGlobal": "Tencent CodeBuddy アカウントプール（グローバル版）: Token 有効期限と疎通確認（30 秒ごとに自動更新）",
@@ -604,6 +610,7 @@
     "colFirstToken": "初回トークン",
     "colAccount": "アカウント",
     "rowAccount": "アカウント",
+    "accountPending": "未取得（後で自動補完）",
     "colLatency": "合計時間",
     "streamShort": "ストリーム",
     "noCreditTitle": "上流がこの項目を返していません（無料とは限りません）",
@@ -1227,7 +1234,7 @@
     "errHourRange": "「{v}」は 0〜23 の整数時刻ではありません",
     "errNumber": "数値を入力してください",
     "errRange": "{min}〜{max}{unit} を入力してください",
-    "errDuration": "形式: 30s / 10m / 2h / 1d",
+    "errDuration": "形式: 30s / 10m / 2h（d は非対応）",
     "errNoNewline": "改行や制御文字は使用できません",
     "errHourFormat": "時刻の形式が正しくありません",
     "errEnum": "許可された範囲外の値です",
