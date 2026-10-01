@@ -114,7 +114,15 @@ function AlertDialogTitle({
   return (
     <AlertDialogPrimitive.Title
       data-slot="alert-dialog-title"
-      className={cn('text-lg font-semibold leading-none tracking-tight', className)}
+      className={cn(
+          // 标题常插值用户数据（账号名、密钥名），按「一定会折行」来设计：
+          // - leading-snug：leading-none 下折行的中文上下几乎贴在一起；
+          // - wrap-anywhere 而非 break-words：二者都允许在长串内断开，但只有 anywhere
+          //   计入最小内容宽度。否则邮箱这类无空格长串会把弹窗的 grid 列撑宽，
+          //   溢出部分被 overflow-hidden 裁掉，靠右的确认键跟着看不见。
+          'text-lg font-semibold leading-snug tracking-tight wrap-anywhere',
+          className,
+      )}
       {...props}
     />
   );
@@ -127,7 +135,11 @@ function AlertDialogDescription({
   return (
     <AlertDialogPrimitive.Description
       data-slot="alert-dialog-description"
-      className={cn('text-xs text-muted-foreground pt-1', className)}
+      className={cn(
+          // 说明里同样会插值长名称，wrap-anywhere 的原因见 AlertDialogTitle
+          'text-xs text-muted-foreground pt-1 wrap-anywhere',
+          className,
+      )}
       {...props}
     />
   );
