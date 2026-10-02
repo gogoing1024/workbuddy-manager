@@ -11,3 +11,6 @@
 # 在任何平台解压都是可用的。不加这条的话，Linux 检出会是 LF，用户下到的包
 # 里就是 LF-only 的 .cmd。
 *.cmd text eol=crlf
+
+# Shell 脚本由 Linux/WSL 执行，必须保持 LF；否则 Bash 会把 CR 当作命令字符。
+*.sh text eol=lf

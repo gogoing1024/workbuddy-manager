@@ -221,7 +221,7 @@ export function AccountTaskDialog({
         </DialogBody>
 
         {/* 二次确认时换成「取消 / 继续」；平时是左对齐的操作条（预览 / 领奖 / 做任务） */}
-        <DialogFooter className={confirmFull ? undefined : 'justify-start'}>
+        <DialogFooter className={confirmFull ? undefined : 'flex-wrap justify-start'}>
           {confirmFull ? (
             <>
               <Button variant="ghost" size="sm" className="rounded-full"

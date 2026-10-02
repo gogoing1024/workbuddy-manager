@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在本地 Linux/WSL 执行，使用 SSH + rsync 将 workbuddy-manager 部署到 VPS。
 #
-# Windows: wsl -e bash /mnt/d/GolandProjects/workbuddy-manager/deploy-to-vps.sh
+# Windows: wsl -e bash /mnt/c/path/to/workbuddy-manager/deploy-to-vps.sh
 #
 # 完全自包含：管理端与上游 workbuddy2api 都由本脚本部署，不依赖机器上已有的
 # 任何 workbuddy 部署。上游源码取自 Release 包内自带的 upstream/ 快照
@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-VPS_HOST="${VPS_HOST:-98.142.250.143}"
+VPS_HOST="${VPS_HOST:-}"
 VPS_USER="${VPS_USER:-root}"
 VPS_PORT="${VPS_PORT:-22}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/workbuddy-manager}"
@@ -59,6 +59,7 @@ LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     cat <<'HELP'
 用法: ./deploy-to-vps.sh [--local]
+示例: VPS_HOST=你的服务器地址 ./deploy-to-vps.sh
 
   （无参数）从 GitHub Release 下载并验签后部署，走正式发布流程。
   --local   上传本地工作区、在 VPS 上构建镜像，用于自定义改造开发。
@@ -100,6 +101,11 @@ fi
 if [ "$#" -ne 0 ]; then
     usage >&2
     exit 2
+fi
+
+if [ -z "$VPS_HOST" ]; then
+    echo "VPS_HOST 为必填参数，请设置服务器地址，例如：VPS_HOST=你的服务器地址 ./deploy-to-vps.sh" >&2
+    exit 1
 fi
 
 for dependency in ssh rsync python3; do
@@ -290,7 +296,11 @@ echo "[2/6] 在 VPS 下载并校验 Release 包..."
 release_dir="$(ssh_exec "REMOTE_DIR='$REMOTE_DIR' MANAGER_REPO='$MANAGER_REPO' RELEASE_VERSION='$RELEASE_VERSION' SKIP_VERIFY='$SKIP_VERIFY' bash -s" <<'REMOTE'
 set -euo pipefail
 umask 077
-api="https://api.github.com/repos/${MANAGER_REPO}/releases/${RELEASE_VERSION}"
+if [ "$RELEASE_VERSION" = "latest" ]; then
+    api="https://api.github.com/repos/${MANAGER_REPO}/releases/latest"
+else
+    api="https://api.github.com/repos/${MANAGER_REPO}/releases/tags/${RELEASE_VERSION}"
+fi
 echo "  查询 Release: ${MANAGER_REPO} ${RELEASE_VERSION}" >&2
 meta="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 60 "$api")" || {
     echo "查询 Release 失败：$api" >&2; exit 1; }
@@ -365,8 +375,11 @@ echo "      发布目录: $release_dir"
 
 # --local：把本地工作区传进刚建好的发布目录。排除清单只为省带宽；镜像内容的
 # 取舍由随代码一起上传的 .dockerignore 决定（单一事实来源，不在这里抄一遍）。
+# --no-perms 不可省：-a 含 -p，会把源目录的权限一并复制到目标上，而源在 WSL 的
+# /mnt/d（DrvFs 恒报 0777），于是 mktemp 建出来的 0700 被刷成 0777，发布目录变成
+# 所有人可写。不保留文件权限没有代价：目录本身是 0700，外部根本进不来。
 if [ "$LOCAL_MODE" = "1" ]; then
-    upload_opts=(-az
+    upload_opts=(-az --no-perms
         --exclude=/.git/ --exclude=/.github/ --exclude=/.ref/ --exclude=/.devdata/
         --exclude=/dev/ --exclude=/docs/
         --exclude=/node_modules/ --exclude=/web/node_modules/ --exclude=/web/.next/
@@ -570,8 +583,9 @@ echo "[4/6] 上传管理端 compose 与部署变量，构建启动..."
 } > "$LOCAL_DIR/.env.vps"
 # compose.vps.yaml 不在 Release 包内（包内只有面向本地开发的 docker-compose.yml），
 # 从本地项目上传；它包含上游目录 / 网络 / 端口等本项目专属的编排约定。
-rsync_exec -az "$LOCAL_DIR/.env.vps" "$VPS_USER@$VPS_HOST:$release_dir/.env"
-rsync_exec -az "$LOCAL_DIR/compose.vps.yaml" "$VPS_USER@$VPS_HOST:$release_dir/compose.vps.yaml"
+# 同第 2 步：--no-perms 防止把 WSL DrvFs 的 0777 刷到发布目录内的文件上
+rsync_exec -az --no-perms "$LOCAL_DIR/.env.vps" "$VPS_USER@$VPS_HOST:$release_dir/.env"
+rsync_exec -az --no-perms "$LOCAL_DIR/compose.vps.yaml" "$VPS_USER@$VPS_HOST:$release_dir/compose.vps.yaml"
 rm -f "$LOCAL_DIR/.env.vps"
 
 # 首启才会生成管理员密码并打印一次；必须**在容器启动之前**判断，否则等构建完
@@ -618,8 +632,15 @@ fi
 
 ready=0
 for _ in $(seq 1 60); do
+    # `< /dev/null` 不是可选的整洁写法，缺了它整个第 5 步会静默失效。
+    # 本脚本经 `ssh ... bash -s <<'REMOTE'` 从 stdin 喂入，而 bash 对管道是惰性
+    # 读取的：`docker compose exec` 默认转发 stdin（`-T` 只关 TTY，不关 stdin），
+    # 会把 bash 尚未读到的后续脚本一并吃掉，bash 随即 EOF、以退出码 0 结束。
+    # 结果就是 ln -s current / 就绪校验 / 旧目录清理全部被跳过，本地脚本却照旧
+    # 打印「部署完成」。往本 heredoc 内新增任何可能读 stdin 的命令，都要同样
+    # 显式重定向 stdin，否则会重现同一个坑。
     if docker compose -f compose.vps.yaml exec -T workbuddy-manager \
-        curl -fsS http://127.0.0.1:7864/api/healthz >/dev/null 2>&1; then
+        curl -fsS http://127.0.0.1:7864/api/healthz >/dev/null 2>&1 < /dev/null; then
         ready=1
         break
     fi
