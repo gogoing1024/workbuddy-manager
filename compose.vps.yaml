@@ -1,0 +1,80 @@
+# WorkBuddy Manager —— VPS 部署（Docker Compose）
+#
+# 完全自包含：上游 workbuddy2api 由 Release 包内自带的 upstream/ 源码快照部署在
+# UPSTREAM_DIR（默认 /opt/workbuddy2api），本文件不依赖任何既有的上游部署。
+#
+# 与仓库根目录 docker-compose.yml（面向本地开发）的区别：
+#   · 上游目录由 UPSTREAM_DIR 指定为宿主机绝对路径，而非「本仓库的兄弟目录」。
+#   · 数据目录用 DEPLOY_ROOT 绝对路径，使发布目录（releases/<时间戳>）可随时切换，
+#     而数据库 / 用户 / 审计记录始终落在同一处。
+#   · 显式加入上游容器所在的 Docker 网络，用**服务名**直连上游 —— 于是上游根本
+#     不必把 7863 发布到公网（比 0.0.0.0:7863 少一层暴露）。
+#   · group_add 补上宿主 docker 组的 gid：/var/run/docker.sock 是 root:docker(0660)，
+#     容器默认只有 10001 组，不补就会「像没挂 socket 一样」降级。
+#
+# 变量由 deploy-to-vps.sh 写入同目录的 .env，正常无需手工编辑。
+
+name: workbuddy-manager
+
+services:
+  workbuddy-manager:
+    build:
+      context: .
+      args:
+        # Release 包内自带已构建的 web/out，这里留空走官方源即可；
+        # 要指定镜像源时改这里或用命令行覆盖。
+        DEBIAN_MIRROR: ""
+        PIP_INDEX_URL: ""
+        NPM_REGISTRY: ""
+        DOCKER_CLI_BASE: ""
+        COMPOSE_URL_PREFIX: ""
+    # 镜像 tag 带 Release 版本（发布包 .version 里的 v1.0.72 → 1.0.72），由部署
+    # 脚本读出来写进同目录 .env；读不到时退回 local。带版本的好处是 `docker images`
+    # 能直接看出哪个镜像对应哪个版本，回滚也能直接切回旧 tag 而无需重新构建。
+    image: "workbuddy-manager:${IMAGE_TAG:-local}"
+    container_name: workbuddy-manager
+    # 容器版「一键更新」靠它把更新后的进程重新拉起，不能改
+    restart: unless-stopped
+    user: "10001:10001"
+    group_add:
+      # 宿主 docker 组的 gid（由部署脚本探测后写入 .env）
+      - "${DOCKER_GID:?DOCKER_GID is required}"
+    environment:
+      TZ: Asia/Shanghai
+      # 同一网络内用服务名直连上游；上游无需对外发布端口
+      WB2API_BASE: "http://${UPSTREAM_CONTAINER:?UPSTREAM_CONTAINER is required}:${UPSTREAM_PORT:-7863}"
+      # 反向代理在后面时，真实 IP 取自它覆盖写入的 X-Real-IP
+      WB_TRUST_PROXY: "1"
+      # 生产环境不暴露 /docs 与 /openapi.json
+      WB_ENABLE_DOCS: "0"
+    ports:
+      # 默认监听所有网卡，可直接用 http://<VPS_IP>:7864 访问。
+      # 只想本机访问就设 BIND_IP=127.0.0.1（配 SSH 隧道或反向代理）。
+      - "${BIND_IP:-0.0.0.0}:${APP_PORT:-7864}:7864"
+    volumes:
+      # 数据库、日志、更新状态、密钥文件都在这里，必须持久化
+      - "${DEPLOY_ROOT:?DEPLOY_ROOT is required}/data:/app/data"
+      # 上游整个目录：管理端要读/写上游 config.json（设置页）与 auths/
+      # （扫码加账号），还要按上游 state_file 解析 data/state.json 清冷却。
+      - "${UPSTREAM_DIR:?UPSTREAM_DIR is required}:/opt/workbuddy2api"
+      # 挂上后容器内的管理端可像宿主部署那样操作上游容器（重载 / 日志 / 更新上游）。
+      # 不挂则那几项自动降级为「请到宿主机操作」，界面会如实提示。
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      # 便于把 WB2API_BASE 换成 host.docker.internal 时仍能连上游
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - upstream
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7864/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # 上游 workbuddy2api 容器所在网络（external：由上游 compose 创建，本文件只加入）
+  upstream:
+    external: true
+    name: "${UPSTREAM_NETWORK:?UPSTREAM_NETWORK is required}"
