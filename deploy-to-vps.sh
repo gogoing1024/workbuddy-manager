@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-VPS_HOST="${VPS_HOST:-}"
+VPS_HOST="${VPS_HOST:-98.142.250.143}"
 VPS_USER="${VPS_USER:-root}"
 VPS_PORT="${VPS_PORT:-22}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/workbuddy-manager}"
