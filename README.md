@@ -35,6 +35,8 @@
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager 仪表盘" width="100%" />
 
+**界面预览**
+
 </div>
 
 ---

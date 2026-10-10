@@ -36,6 +36,8 @@ Published and discussed in the [**LINUX DO**](https://linux.do) community â€” ä½
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager dashboard" width="100%" />
 
+**Interface preview**
+
 </div>
 
 ---
