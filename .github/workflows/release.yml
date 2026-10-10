@@ -97,8 +97,30 @@ jobs:
           cp -r server "$STAGE/"
           mkdir -p "$STAGE/web" && cp -r web/out "$STAGE/web/"
           cp -r deploy "$STAGE/"
-          # 文档一并打包（安全审查报告、设计说明等），便于离线查阅
-          cp -r docs "$STAGE/" 2>/dev/null || true
+          # ── 用户文档（白名单）────────────────────────────────────────
+          # 只把**用户看得懂的文档**放进发布包：维护者手册（发布流程 / i18n /
+          # 命名兼容 / 上游修复记录 / 提案 / 设计方案）留在仓库里做开发参考，
+          # 用户机器上不需要它们 —— 少一份内部文档落地，也少一份「内部细节
+          # 顺手被分发出去」的风险。
+          # 名单不许手改完就算：docs-pack:begin / end 之间的内容由
+          # server/tests/test_docs_packaging.py 双向守着（README 链到的必须
+          # 在名单里；名单里不许有 README 链不到的）。
+          # docs-pack:begin
+          DOCS_LIST="usage.md features.md screenshots.md development.md security-notes.md api-tokens.md account-proxy-routes.md SECURITY-AUDIT.md release-signing.md"
+          mkdir -p "$STAGE/docs"
+          for f in $DOCS_LIST; do
+            cp "docs/$f" "$STAGE/docs/" || { echo "::error::发布包缺少用户文档 docs/$f"; exit 1; }
+          done
+          cp -r docs/images "$STAGE/docs/images" || { echo "::error::发布包缺少截图 docs/images"; exit 1; }
+          # 反向核对：包内 docs/ 只许出现名单里的东西 —— 防止别处又加了一次整目录拷贝
+          # （那种改动会让 6 篇内部文档静默进入每一个用户的安装目录）。
+          for got in $(ls "$STAGE/docs"); do
+            case " $DOCS_LIST images " in
+              *" $got "*) ;;
+              *) echo "::error::包内 docs/ 出现计划外文件：$got（内部文档不应进发布包）"; exit 1 ;;
+            esac
+          done
+          # docs-pack:end
           cp .env.example README.md README.en.md CHANGELOG.md LICENSE "$STAGE/"
           # 容器部署资产一并打包：用户下载发布包后可直接 docker compose up，
           # 不必再回仓库取这两个文件（实测漏打包过，Docker 用户拿不到）
