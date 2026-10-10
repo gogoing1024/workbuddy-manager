@@ -485,7 +485,7 @@ if __name__ == '__main__':
 class MalformedLoginBodyTest(unittest.TestCase):
     """登录接口对「合法 JSON 但非对象」的 body 必须返回 400，而不是 500。
 
-    实测（真实部署 https://wk.sbai.shop/）：`null` 与 `[]` 会让 `body.get()`
+    实测（真实部署环境）：`null` 与 `[]` 会让 `body.get()`
     抛 AttributeError → 500。虽然 500 的响应体只有 "Internal Server Error"、
     不泄露堆栈，但这属于未处理异常：
 
