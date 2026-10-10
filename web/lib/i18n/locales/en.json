@@ -1590,6 +1590,7 @@
     "fieldModels": "Allowed models",
     "fieldModelsPlaceholder": "One per line, or comma-separated\ne.g. glm-5.2, deepseek-v4.1-flash",
     "fieldModelsHint": "Token packets must set a scope: token counts depend heavily on the model (the same context costs different amounts on different models), so “N tokens” is ambiguous without one. Credit packets have no such field — they are billed by real spend, so any model works.",
+    "fieldModelsHintOptional": "Optional for credit packets — leave empty for no restriction (billing follows real usage; any model works), or list the models it may call.",
     "errModels": "Please specify the allowed models for a token packet",
     "modelsScoped": "Models: {list}",
     "claimLink": "Claim link",

@@ -1357,6 +1357,7 @@
     "fieldModels": "限定模型",
     "fieldModelsPlaceholder": "每行一个，或用逗号分隔\n例如：glm-5.2, deepseek-v4.1-flash",
     "fieldModelsHint": "Token 红包必须限定范围：token 数与模型强相关（同一段上下文在不同模型下消耗不同），不限定的话「多少 token」这个说法是浮动的。积分红包没有这一项 —— 它按真实扣费算，任何模型都能用。",
+    "fieldModelsHintOptional": "积分红包可以不填：留空 = 不限制（按真实扣费计，任何模型都能用）；填了就只放行这些模型。",
     "errModels": "Token 红包请先填写限定的模型",
     "modelsScoped": "限定模型：{list}",
     "claimLink": "抽奖链接",
