@@ -69,8 +69,6 @@ upstream repo is gone, and its source is now maintained here.
 
 ---
 
----
-
 ## Highlights
 
 ### Accounts
@@ -167,14 +165,17 @@ in [the usage guide](docs/usage.md).
 | `POST` | `/v1/messages` | gateway key | Anthropic Messages API compatible (Claude Code, etc.) |
 | `POST` | `/v1/messages/count_tokens` | gateway key | Rough input-token estimate (by character count) |
 | `GET` | `/v1/models` | gateway key | Model list |
+| `GET` | `/v1/usage` | gateway key | Self-check for one key: used / remaining quota, expiry, model scope (reads panel records; makes no call) |
 | `GET` | `/healthz` | none | Liveness probe (includes upstream connectivity) |
 | `GET` | `/api/me` | session | Current user |
 | `POST` | `/api/login` `/api/logout` | none | Sign in / out |
 | `GET` | `/api/accounts` | session | Account list |
+| `GET` | `/api/accounts/credits-snapshot` | session / read-only token | Read-only snapshot of recorded credits (dashboards / reconciliation; never queries upstream) |
 | `POST` | `/api/auth/start` `/api/auth/poll` | admin | QR authorisation flow |
 | `POST` | `/api/accounts/{file}/checkin` `/test` `/refresh` | admin | Check-in / probe / refresh |
 | `DELETE` | `/api/accounts/{file}` | admin | Delete an account |
 | `GET/POST/PATCH/DELETE` | `/api/keys[/{id}]` | session / admin | Key management (handed to downstream callers) |
+| `GET/POST/PATCH/DELETE` | `/api/upstreams[/{id}]` | session (admin) | Multiple upstream endpoints (a key bound to one = account-pool group); `POST /api/upstreams/{id}/probe` checks connectivity |
 | `GET/POST/PATCH/DELETE` | `/api/tokens[/{id}]` | session (admin) | Admin API tokens (for scripts / CI, see [docs/api-tokens.md](docs/api-tokens.md)) |
 | `GET` | `/api/logs` `/api/stats/*` | session | Logs and usage |
 | `GET/POST/DELETE` | `/api/security/*` | session / admin | IP rules and audit |
@@ -182,8 +183,6 @@ in [the usage guide](docs/usage.md).
 | `GET/POST` | `/api/settings/pg-sync*` | session (admin) | PostgreSQL off-site backup: config / test / migrate / restore |
 
 Admin API details are available at `/docs` (Swagger UI) when enabled.
-
----
 
 ---
 
@@ -208,8 +207,6 @@ Threat model and hardening notes: [security notes](docs/security-notes.md) and t
   latency, source), to protect privacy.
 - Usage is aggregated per day × key × model; hourly granularity would require extending the
   `usage_daily` table.
-
----
 
 ---
 
@@ -250,8 +247,6 @@ git tag v1.0.1 && git push origin v1.0.1
 
 CI builds the frontend, packages the artifacts, extracts the matching CHANGELOG section as
 release notes, and creates a Release with the archives attached.
-
----
 
 ---
 

@@ -111,10 +111,44 @@ class KeyUsageEndpointTest(_Base):
 
     def test_missing_or_invalid_key_is_rejected(self) -> None:
         client = self._client()
-        self.assertEqual(client.get('/v1/usage').status_code, 401)
+        missing = client.get('/v1/usage')
+        self.assertEqual(missing.status_code, 401)
+        self.assertIn('missing_api_key', missing.text)
         r = client.get('/v1/usage', headers={'Authorization': 'Bearer wbk_not-a-real-key'})
         self.assertEqual(r.status_code, 401)
         self.assertIn('invalid_api_key', r.text)
+
+        # 这条路径**未鉴权可达**，两种认不出调用方的访问都要留在入站日志里，
+        # 且原因可区分（复审补的审计缺口：此前整条路径一行都不记，
+        # 「谁在用无效密钥扫 /v1/usage」在安全页上不存在）。
+        rows = db.query('SELECT reason, blocked FROM ip_access_logs ORDER BY id')
+        self.assertEqual([(x['reason'], x['blocked']) for x in rows],
+                         [('missing_key', 1), ('invalid_key', 1)])
+
+    def test_reading_usage_is_logged_but_costs_nothing(self) -> None:
+        """查用量要进**请求日志**（否则监控轮询在运维眼里是隐形的），
+        但**不花钱、不记账**：已用 token / 已用积分一律不动 —— 这两个数字是
+        计费口径，只有真实调用才会推动它们。
+        `last_used_at` 与「来源 IP」照记：与 `/v1/models`、面板 API 令牌同口径，
+        「这把钥匙最近被谁用过」在安全页上是有效信号。"""
+        token = self._make_key()
+        prefix = token[:12]
+
+        r = self._client().get('/v1/usage', headers={'Authorization': f'Bearer {token}'})
+        self.assertEqual(r.status_code, 200, r.text)
+
+        row = db.query_one('SELECT last_used_at, used_tokens, used_credit '
+                           'FROM api_keys WHERE prefix = ?', (prefix,))
+        self.assertGreaterEqual(row['last_used_at'], int(time.time()) - 5,
+                                '查用量应在「最近使用」上留痕，与模型列表页同口径')
+        self.assertEqual(row['used_tokens'], 0, '查用量被计成了 token 消耗')
+        self.assertEqual(row['used_credit'], 0, '查用量被计成了积分消耗')
+
+        logs = db.query('SELECT status, prompt_tokens, completion_tokens '
+                        'FROM request_logs ORDER BY id')
+        self.assertEqual(len(logs), 1, '查用量的请求没进请求日志')
+        self.assertEqual((logs[0]['status'], logs[0]['prompt_tokens'],
+                          logs[0]['completion_tokens']), (200, 0, 0))
 
     def test_cannot_read_another_keys_numbers(self) -> None:
         mine = self._make_key(name='我的')

@@ -3,8 +3,6 @@
 > 从 README 拆出来的一节，内容不变；另见 [安全审计报告](SECURITY-AUDIT.md)。
 > 这里讲的是**本项目的安全设计**，不是漏洞上报流程（那属于仓库的 SECURITY 政策，需要时另建）。
 
-# 安全说明
-
 - 网关密钥仅存 SHA-256 哈希，明文只在创建时返回一次
 - 管理端密码使用 PBKDF2-SHA256（26 万次迭代）加盐存储
 - 会话使用 HttpOnly + SameSite=Lax 签名 Cookie，生产环境自动启用 `Secure`

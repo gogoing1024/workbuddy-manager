@@ -16,6 +16,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -50,6 +51,7 @@ class CreditsSnapshotShapeTest(unittest.TestCase):
         rows = creditsvc.snapshot_entries()
         self.assertEqual(rows['accounts'], [{'uid': 'u1', 'credits': 100,
                                              'registered_at': entry['at']}])
+        # 服务层不认识账号文件：known 标记由**接口层**按本机账号补（见下面端点用例）
         self.assertEqual(rows['snapshot_at'], entry['at'], '顶层 snapshot_at 应是最新登记时刻')
 
     def test_legacy_numeric_snapshot_still_compared(self) -> None:
@@ -71,6 +73,7 @@ class CreditsSnapshotEndpointTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         config.DB_PATH = Path(self._tmp.name) / 'm.db'
         config.USERS_FILE = Path(self._tmp.name) / 'users.json'
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
         db._conn = None
         db.connect()
         security.save_users({'secret': 'S', 'users': [
@@ -91,6 +94,40 @@ class CreditsSnapshotEndpointTest(unittest.TestCase):
         assert c.post('/api/login', json={'username': 'admin', 'password': 'p'}).status_code == 200
         return c
 
+    def _write_account(self, uid: str) -> None:
+        config.AUTH_DIR.mkdir(parents=True, exist_ok=True)
+        (config.AUTH_DIR / f'workbuddy-{uid}.json').write_text(
+            json.dumps({'account': {'uid': uid}, 'auth': {'accessToken': 'T',
+                                                          'expiresAt': int(time.time()) + 3600}}),
+            encoding='utf-8')
+
+    def test_known_flag_marks_deleted_accounts(self) -> None:
+        """账号删掉后快照仍留着它的历史记录：对账脚本要能一眼分辨
+        「还在的账号」和「只剩记录的 uid」，因此每行必须带 `known`。"""
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
+        creditsvc.record_balance('still-here', '还在', 100)
+        creditsvc.record_balance('deleted', '已删', 200)
+        self._write_account('still-here')
+
+        body = self._client().get('/api/accounts/credits-snapshot').json()
+        by_uid = {row['uid']: row for row in body['accounts']}
+        self.assertTrue(by_uid['still-here']['known'], '在池账号被判成已删除')
+        self.assertFalse(by_uid['deleted']['known'], '已删账号没被标出来')
+        self.assertEqual(body['known_count'], 1)
+
+    def test_disabled_account_still_counts_as_known(self) -> None:
+        """「临时禁用」只是改名 `.disabled`，账号还在、随时能启用 ——
+        把它算成已删除会让对账脚本误删一条本该保留的记录。"""
+        config.AUTH_DIR = Path(self._tmp.name) / 'auths'
+        creditsvc.record_balance('off-line', '被禁用', 300)
+        self._write_account('off-line')
+        (config.AUTH_DIR / 'workbuddy-off-line.json').rename(
+            config.AUTH_DIR / 'workbuddy-off-line.json.disabled')
+
+        body = self._client().get('/api/accounts/credits-snapshot').json()
+        self.assertTrue(body['accounts'][0]['known'])
+        self.assertEqual(body['known_count'], 1)
+
     def test_endpoint_reads_without_asking_upstream(self) -> None:
         creditsvc.record_balance('u9', '九号', 777)
 
@@ -105,3 +142,4 @@ class CreditsSnapshotEndpointTest(unittest.TestCase):
         self.assertEqual(row['credits'], 777)
         self.assertIsInstance(body['snapshot_at'], int)
         self.assertIsInstance(row['registered_at'], int)
+        self.assertFalse(row['known'], '临时库里没有这个账号，应标为已不存在')

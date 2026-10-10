@@ -384,6 +384,11 @@ class CachedIdsTest(unittest.TestCase):
 class HintFrontendWiringTest(unittest.TestCase):
     """前端要真的显示这个提示，且「查不了」不能显示成「全部正确」。"""
 
+    def _component(self) -> str:
+        return (Path(__file__).resolve().parents[2]
+                / 'web/components/common/keys/ModelWhitelistInput.tsx'
+                ).read_text(encoding='utf-8')
+
     def _page(self) -> str:
         return (Path(__file__).resolve().parents[2]
                 / 'web/app/(main)/keys/page.tsx').read_text(encoding='utf-8')
@@ -416,6 +421,12 @@ class HintFrontendWiringTest(unittest.TestCase):
         seg = src[start:src.index('onBlur', start)]
         self.assertIn('setUnknownModels(null)', seg, '改了白名单却留着上次的校验结果')
         self.assertIn('models: next', seg, '组件回传的值没写回 form.models')
+        # 打字过程中也要作废：输入框里的草稿要失焦才提交，只清 onChange 的话
+        # 「改到一半」这一段里提示还是上一版的值（浏览器验收实测踩到，见
+        # dev/verify_whitelist_hint.py 的第 3 步）。
+        self.assertIn('onEdit=', seg, '打字时不作废旧结论')
+        comp = self._component()
+        self.assertIn('onEdit?.()', comp, '组件没有把「正在编辑」告诉父组件')
 
     def test_all_locales_define_the_key(self) -> None:
         import json

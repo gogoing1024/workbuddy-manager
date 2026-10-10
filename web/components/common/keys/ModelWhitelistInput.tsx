@@ -29,6 +29,7 @@ import {cn} from '@/lib/utils';
 export function ModelWhitelistInput({
   value,
   onChange,
+  onEdit,
   onBlur,
   realm,
   placeholder,
@@ -36,8 +37,17 @@ export function ModelWhitelistInput({
 }: {
   value: string;
   onChange: (next: string) => void;
-  onBlur?: () => void;
-  /** 当前密钥的限定版本；国际版清单排前面，便于对照 */
+  /**
+   * 正在编辑（新值还没提交到 `value`）。
+   *
+   * 父组件用它**作废上一次的校验结论**：输入框里的草稿只有失焦/回车才提交，若不作废，
+   * 用户改了内容而提示还是旧的 —— 显示的「都对」可能对应的是改之前那一版，
+   * 比不显示更误导（issue #46 那条不变量的原话）。
+   */
+  onEdit?: () => void;
+  /** 失焦：参数是**提交后**的白名单字符串（父组件据此校验已知/未知模型） */
+  onBlur?: (next: string) => void;
+  /** 当前密钥的限定版本：清单里与它一致的那一组排在前面，便于先挑本版模型 */
   realm?: Realm | '';
   placeholder?: string;
   disabled?: boolean;
@@ -80,12 +90,15 @@ export function ModelWhitelistInput({
     }
   }
 
-  const groups: {key: Realm; label: string; models: ModelInfo[]}[] = catalog
-    ? [
-        {key: 'global', label: t('realm.global'), models: catalog.global},
-        {key: 'cn', label: t('realm.cn'), models: catalog.cn},
-      ]
-    : [];
+  // 与密钥「限定版本」一致的那一组排前面：国内版密钥最可能选的是国内版模型。
+  const groups: {key: Realm; label: string; models: ModelInfo[]}[] = [];
+  if (catalog) {
+    groups.push({key: 'cn', label: t('realm.cn'), models: catalog.cn});
+    groups.push({key: 'global', label: t('realm.global'), models: catalog.global});
+    // 排序要就地进行：写成 `[...].sort(...)` 会让 TS 把字面量的 key 推宽成 string，
+    // 整个数组就不再是声明的那个类型（tsc 报过）。
+    groups.sort((a, b) => (a.key === realm ? -1 : b.key === realm ? 1 : 0));
+  }
   const needle = query.trim().toLowerCase();
   const filtered = groups
     .map((g) => ({
@@ -95,7 +108,7 @@ export function ModelWhitelistInput({
     .filter((g) => g.models.length > 0);
 
   return (
-    <div className={cn('space-y-1.5', realm === 'global' && 'order-first')}>
+    <div className="space-y-1.5">
       {names.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {names.map((name) => (
@@ -124,9 +137,14 @@ export function ModelWhitelistInput({
           disabled={disabled}
           placeholder={placeholder}
           onChange={(e) => {
+            onEdit?.();            // 值还没提交，先把上一次的校验结论作废
             // 逗号是既有的分隔写法：粘贴一串名字时按它就拆开
             if (e.target.value.includes(',')) {
-              e.target.value.split(',').forEach((part) => add(part));
+              // 粘贴「a, b, c」时**一次算好再提交**：逐个调用 add() 会各自基于同一份
+              // 旧 names 计算，最后只剩最后一个（复审时发现的真 bug）。
+              const parts = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+              if (parts.length) emit([...names, ...parts]);
+              setDraft('');
               return;
             }
             setDraft(e.target.value);
@@ -140,8 +158,12 @@ export function ModelWhitelistInput({
             }
           }}
           onBlur={() => {
-            if (draft.trim()) add(draft);
-            onBlur?.();
+            // 把提交后的新值一起给出去：父组件拿它做「这些名字存在吗」的校验，
+            // 而它自己的 state 此刻还没更新（读旧值会漏掉刚输入的这一个）。
+            const merged = Array.from(new Set([...names, draft.trim()].filter(Boolean)));
+            if (draft.trim()) onChange(merged.join(', '));
+            setDraft('');
+            onBlur?.(merged.join(', '));
           }}
         />
         <Popover

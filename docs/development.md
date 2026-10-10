@@ -23,6 +23,11 @@ npm install
 npm run dev                          # http://localhost:3000
 ```
 
+> **要预览「打包后的界面」时必须用 `npm run build:export`**：静态导出只在
+> `NEXT_OUTPUT_EXPORT=1` 时开启，直接跑 `next build` 只会更新 `.next/`，而
+> `web/out/` 会**保持上一次的旧产物** —— 界面看起来像「改动没生效」，其实是被过期
+> 的产物骗了（浏览器验收脚本读的就是 `web/out/`，踩过一次）。
+
 首次启动会自动生成 `users.json` 与随机签名密钥。若未设置 `WB_ADMIN_PASSWORD`，会在日志中打印一次随机管理员密码。
 
 > **代理注意事项**
