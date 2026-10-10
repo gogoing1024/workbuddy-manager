@@ -4,19 +4,9 @@
 
 **Management console for Tencent CodeBuddy account pools · OpenAI-compatible gateway**
 
-A web console for [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api):
-bulk QR onboarding, scheduled check-in and token keep-alive, per-group API key
-distribution, IP and model allowlists, request logs and usage analytics; installs and
-updates come from a signed release package.
-
-> The upstream workbuddy2api source **ships inside this project's release package**
-> (MIT). Existing deployments are unaffected — for reinstall/migration, see the
-> [deployment guide](deploy/README.md#〇上游源码从哪来随发布包分发).
+A web console for [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api): QR onboarding, scheduled check-in and keep-alive, per-group key distribution, IP and model allowlists, request logs and usage stats; the upstream source ships inside the release package (MIT) — see the [deployment guide](deploy/README.md#〇上游源码从哪来随发布包分发) for migration.
 
 ![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
-![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?logo=tailwindcss&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-22c55e)
@@ -24,11 +14,8 @@ updates come from a signed release package.
 [![Release](https://img.shields.io/github/v/release/ithtelab/workbuddy-manager?color=22c55e&label=Release)](https://github.com/ithtelab/workbuddy-manager/releases)
 [![Changelog](https://img.shields.io/badge/Changelog-CHANGELOG-blue)](CHANGELOG.md)
 [![Issues](https://img.shields.io/github/issues/ithtelab/workbuddy-manager?color=f59e0b&label=Issues)](https://github.com/ithtelab/workbuddy-manager/issues)
-[![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-1f6feb)](https://linux.do)
 
-**English** · [简体中文](README.md)
-
-Published and discussed in the [**LINUX DO**](https://linux.do) community — 佬友 welcome.
+**English** · [简体中文](README.md) ｜ Documented and discussed in the [LINUX DO](https://linux.do) community
 
 <img src="docs/images/sponsor-slot.svg" alt="sponsored slot (reserved)" width="100%" />
 
