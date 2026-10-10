@@ -32,9 +32,7 @@ Published and discussed in the [**LINUX DO**](https://linux.do) community — �
 
 <img src="docs/images/sponsor-slot.svg" alt="sponsored slot (reserved)" width="100%" />
 
-**Sponsored slot · reserved** — the audience here runs Tencent CodeBuddy account pools and is made up of developers.
-
-*This page carries a sponsored slot. There is no technical dependency on sponsors, and a listing is not a recommendation or endorsement of their service.*
+**Sponsored slot · reserved**
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager dashboard" width="100%" />
 

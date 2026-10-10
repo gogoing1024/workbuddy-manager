@@ -31,9 +31,7 @@
 
 <img src="docs/images/sponsor-slot.svg" alt="赞助位（虚位以待）" width="100%" />
 
-**赞助位 · 虚位以待** —— 面向腾讯 CodeBuddy 账号池用户，读者基本都是开发者。
-
-*本页含赞助展示位；与赞助商无技术依赖，展示不代表本项目对其服务做出推荐或背书。*
+**赞助位 · 虚位以待**
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager 仪表盘" width="100%" />
 
