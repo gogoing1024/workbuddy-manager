@@ -13,6 +13,7 @@ import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
+import {ModelWhitelistInput} from '@/components/common/keys/ModelWhitelistInput';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
 import {useAuth} from '@/lib/auth-context';
@@ -100,7 +101,7 @@ const EMPTY_UPSTREAMS: UpstreamEndpoint[] = [];
 export default function KeysPage() {
   const t = useT();
   const {isAdmin} = useAuth();
-  const {realm, label: realmName} = useRealm();
+  const {realm} = useRealm();
   /**
    * 密钥列表 + 上游列表。**两份数据放同一个 hook，不拆。**
    *
@@ -947,17 +948,25 @@ export default function KeysPage() {
               </div>
               <div className="space-y-1.5">
                 <Label className="text-[11px] text-muted-foreground">{t('keys.modelWhitelist')}</Label>
-                <Input
+                {/* 手输保留（清单里暂时没有的模型仍要能填），旁边给「从清单选择」：
+                    候选按版本分组，勾选即加入 —— 记不住名字、写错了等调用失败才发现的日子结束。 */}
+                <ModelWhitelistInput
                   value={form.models}
-                  onChange={(e) => {
-                    setForm({...form, models: e.target.value});
+                  realm={form.realm}
+                  placeholder="glm-5.2, global:gpt-5.4"
+                  onChange={(next) => {
+                    setForm({...form, models: next});
                     // 改了内容就作废上次结论，避免显示过期的「都对」
                     setUnknownModels(null);
                   }}
-                  // 失焦时查一次：不在每次按键时打接口（那是逐字请求），
+                  // 还在打字（草稿未提交）时同样要作废：否则改到一半就切走视线，
+                  // 看到的仍是上一版的结论（见组件里 onEdit 的说明）
+                  onEdit={() => setUnknownModels(null)}
+                  // 离开输入框时查一次：不在每次按键时打接口（那是逐字请求），
                   // 但要早于提交——提交时才发现就得重填一遍
-                  onBlur={async () => {
-                    const names = toLines(form.models);
+                  onBlur={async (next) => {
+                    // 用组件交回来的新值校验：此时 form.models 还没更新，读它会漏掉刚输入的模型。
+                    const names = toLines(next);
                     if (!names.length) {
                       setUnknownModels([]);
                       return;
@@ -969,7 +978,6 @@ export default function KeysPage() {
                       setUnknownModels(null);   // 查不了就不显示，不编造
                     }
                   }}
-                  placeholder="glm-5.2, global:gpt-5.4"
                 />
                 {unknownModels !== null && unknownModels.length > 0 && (
                   <p ref={unknownRef}

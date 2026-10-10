@@ -1008,6 +1008,45 @@ async def account_credits(
     }
 
 
+def _local_uids() -> set[str]:
+    """本机**所有分组**当前存在的账号 uid（含被临时禁用的）。
+
+    快照按 uid 登记、不分分组，所以判断「这个 uid 还在不在」也要跨分组找。
+    被禁用的账号算存在：那只是把文件改名为 `.disabled`，随时可以再启用
+    （与 `wb2api.list_auth_accounts` 的口径一致）。
+    """
+    found: set[str] = set()
+    for group in upstreamsvc.list_upstreams():
+        directory = _group_dir(group)
+        if directory is None:
+            continue
+        for account in wb2api.list_auth_accounts(directory):
+            uid = str(account.get('uid') or '').strip()
+            if uid:
+                found.add(uid)
+    return found
+
+
+@router.get('/accounts/credits-snapshot')
+def credits_snapshot(user: dict = Depends(security.current_user)) -> dict:
+    """已登记的积分快照（只读）。
+
+    给外部工具/对账用：**不触发任何上游查询**，只回面板已经记录下来的余额与登记
+    时刻。读接口，只读令牌也能调；请把数字按「已登记」使用，不要当实时余额。
+
+    快照**跨全部分组**（它按 uid 登记，不分组的），每行因此带一个 `known`：
+    该 uid 现在是否还对应一个本机账号。账号删掉之后，快照里那份历史记录不会
+    跟着消失 —— 对账脚本可以据 `known=false` 把它排除，或反过来当作
+    「这个账号曾经存在」的凭据。
+    """
+    payload = creditsvc.snapshot_entries()
+    known = _local_uids()
+    for row in payload['accounts']:
+        row['known'] = row['uid'] in known
+    payload['known_count'] = sum(1 for row in payload['accounts'] if row['known'])
+    return payload
+
+
 @router.post('/accounts/refresh-credits')
 async def refresh_all_credits(
     force: bool = True,
