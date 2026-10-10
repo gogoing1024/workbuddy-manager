@@ -30,12 +30,11 @@ updates come from a signed release package.
 
 Published and discussed in the [**LINUX DO**](https://linux.do) community — 佬友 welcome.
 
-<!-- Sponsorship slot: replace the two lines below once the partner's assets
-     (logo / one-line blurb / promo code / UTM link) are in place. -->
-<img src="docs/images/sponsor-slot.svg" alt="sponsor slot" width="880" />
+<img src="docs/images/sponsor-slot.svg" alt="sponsored slot (reserved)" width="100%" />
 
 **Sponsored slot · reserved** — the audience here runs Tencent CodeBuddy account pools and is made up of developers.
-<sub>This page carries a sponsored slot. There is **no technical dependency** on sponsors, and a listing is not a recommendation or endorsement of their service.</sub>
+
+*This page carries a sponsored slot. There is no technical dependency on sponsors, and a listing is not a recommendation or endorsement of their service.*
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager dashboard" width="100%" />
 

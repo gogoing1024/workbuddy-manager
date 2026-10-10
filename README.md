@@ -29,11 +29,11 @@
 
 本项目在 [**LINUX DO**](https://linux.do) 社区发布与交流，欢迎佬友来玩。
 
-<!-- 赞助位：合作方素材（logo / 一行说明 / 优惠码 / 带 UTM 的链接）到位后替换下面两行 -->
-<img src="docs/images/sponsor-slot.svg" alt="赞助位" width="880" />
+<img src="docs/images/sponsor-slot.svg" alt="赞助位（虚位以待）" width="100%" />
 
 **赞助位 · 虚位以待** —— 面向腾讯 CodeBuddy 账号池用户，读者基本都是开发者。
-<sub>本页含赞助展示位；与赞助商**无技术依赖**，展示不代表本项目对其服务做出推荐或背书。</sub>
+
+*本页含赞助展示位；与赞助商无技术依赖，展示不代表本项目对其服务做出推荐或背书。*
 
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager 仪表盘" width="100%" />
 
