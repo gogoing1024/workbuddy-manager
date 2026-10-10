@@ -194,7 +194,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ithtelab/workbuddy-manager/m
 - 敏感操作全部留审计日志（谁、什么时候、做了什么）
 - 发布包带签名校验，一键更新验签通过才安装
 
-完整的威胁模型与加固建议见 [安全说明](docs/security.md) 与
+完整的威胁模型与加固建议见 [安全说明](docs/security-notes.md) 与
 [安全审计报告](docs/SECURITY-AUDIT.md)。
 
 ---
@@ -215,7 +215,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ithtelab/workbuddy-manager/m
 - [功能一览（完整版）](docs/features.md) —— 每条功能的细节
 - [界面预览（全部）](docs/screenshots.md) —— 全部截图
 - [开发与架构](docs/development.md) —— 本地开发、架构、目录结构
-- [安全说明](docs/security.md) —— 威胁模型与加固
+- [安全说明](docs/security-notes.md) —— 威胁模型与加固
 - [部署指南](deploy/README.md) —— 反向代理、HTTPS、Windows 原生、一键更新
 - [账号出口线路](docs/account-proxy-routes.md) —— 每个账号走不同代理出口
 - [API 令牌](docs/api-tokens.md) —— 只读令牌与作用域

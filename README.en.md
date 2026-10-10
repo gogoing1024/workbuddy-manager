@@ -205,7 +205,7 @@ Admin API details are available at `/docs` (Swagger UI) when enabled.
 - Every sensitive action is audited (who, when, what)
 - Release packages are signed; one-click updates verify the signature before installing
 
-Threat model and hardening notes: [security notes](docs/security.md) and the
+Threat model and hardening notes: [security notes](docs/security-notes.md) and the
 [security audit report](docs/SECURITY-AUDIT.md).
 
 ---
@@ -230,7 +230,7 @@ Threat model and hardening notes: [security notes](docs/security.md) and the
 - [Full feature list](docs/features.md) — every feature in detail
 - [Screenshot gallery](docs/screenshots.md) — all screenshots
 - [Development & architecture](docs/development.md) — local dev, architecture, layout
-- [Security notes](docs/security.md) — threat model and hardening
+- [Security notes](docs/security-notes.md) — threat model and hardening
 - [Deployment guide](deploy/README.md) — reverse proxy, HTTPS, Windows, updates
 - [Account proxy routes](docs/account-proxy-routes.md) — per-account egress
 - [API tokens](docs/api-tokens.md) — read-only tokens and scopes
