@@ -405,11 +405,17 @@ class HintFrontendWiringTest(unittest.TestCase):
                       'checked=false 时没退回 null')
 
     def test_editing_invalidates_previous_result(self) -> None:
-        """改了内容要作废上次结论，否则显示的是**过期**的「都对」。"""
+        """改了内容要作废上次结论，否则显示的是**过期**的「都对」。
+
+        #141 之后白名单换成组件（`ModelWhitelistInput`：可勾选的清单 + 手输），
+        但这条不变量没变：凡是把用户改动写回 `form.models` 的地方，都要顺手把上次
+        校验结果清掉。
+        """
         src = self._page()
-        seg = src[src.index('onChange={(e) => {'):]
-        seg = seg[:seg.index('onBlur')]
+        start = src.index('<ModelWhitelistInput')
+        seg = src[start:src.index('onBlur', start)]
         self.assertIn('setUnknownModels(null)', seg, '改了白名单却留着上次的校验结果')
+        self.assertIn('models: next', seg, '组件回传的值没写回 form.models')
 
     def test_all_locales_define_the_key(self) -> None:
         import json

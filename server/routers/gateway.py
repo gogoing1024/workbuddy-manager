@@ -532,6 +532,51 @@ def _scan_sse(pending: str, usage: dict) -> tuple[str, bool]:
     return pending, saw_content
 
 
+# ── 密钥自查用量（issue #137）─────────────────────────────
+# 拿密钥自身鉴权、只回这把密钥自己的数字，**只读面板已记录的值、不触发任何上游请求**
+# （否则「查一下还剩多少」会变成一次真实调用，反过来加剧额度消耗与限流）。
+#
+# 有意**不套用**调用时的那套校验（额度用尽 / 已过期 / 被停用 / IP 白名单）：恰恰是
+# 在调不动的时候，用户最需要看到「还剩多少、为什么调不动」。密钥本身已证明归属，
+# 这里只暴露它自己的元数据，把状态如实回给调用方，而不是再甩一个 401。
+@router.get('/v1/usage')
+def key_usage(request: Request):
+    token = _bearer(request)
+    key = keysvc.resolve(token) if token else None
+    if not key:
+        return _oai_error('API Key 无效', 401, 'authentication_error', 'invalid_api_key')
+
+    def allowance(limit: int | None, used: int | None) -> dict:
+        used_n = int(used or 0)
+        limit_n = int(limit or 0)
+        return {
+            'used': used_n,
+            'limit': limit_n or None,          # None = 不限制
+            'remaining': max(0, limit_n - used_n) if limit_n else None,
+        }
+
+    now = int(time.time())
+    expires_at = int(key.get('expires_at') or 0)
+    return {
+        'object': 'key.usage',
+        'key': {
+            'name': key.get('name') or '',
+            'prefix': key.get('prefix') or '',
+            'realm': key.get('realm') or '',
+            'enabled': bool(key.get('enabled')),
+            'expires_at': expires_at,
+            'expired': bool(expires_at and now >= expires_at),
+            'models': list(key.get('models') or []),
+        },
+        'tokens': allowance(key.get('quota'), key.get('used_tokens')),
+        'credits': allowance(key.get('quota_credit'), key.get('used_credit')),
+        'last_used_at': int(key.get('last_used_at') or 0),
+        # 这几个数字是面板**已记录**的值，读取时刻即 snapshot_at；不是向上游现问的。
+        'snapshot_at': now,
+        'data_source': 'panel-recorded',
+    }
+
+
 # ── 模型列表 ─────────────────────────────────────────────
 # 列表按密钥的版本归属过滤：国际版密钥只看到 `global:` 条目、国内版密钥只看到
 # 其余条目（限定了版本的密钥看不到另一版本，免得挑出一个注定 403 的模型）。

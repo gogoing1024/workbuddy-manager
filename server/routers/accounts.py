@@ -1008,6 +1008,16 @@ async def account_credits(
     }
 
 
+@router.get('/accounts/credits-snapshot')
+def credits_snapshot(user: dict = Depends(security.current_user)) -> dict:
+    """已登记的积分快照（只读）。
+
+    给外部工具/对账用：**不触发任何上游查询**，只回面板已经记录下来的余额与登记
+    时刻。读接口，只读令牌也能调；请把数字按「已登记」使用，不要当实时余额。
+    """
+    return creditsvc.snapshot_entries()
+
+
 @router.post('/accounts/refresh-credits')
 async def refresh_all_credits(
     force: bool = True,
