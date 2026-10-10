@@ -30,6 +30,13 @@ updates come from a signed release package.
 
 Published and discussed in the [**LINUX DO**](https://linux.do) community — 佬友 welcome.
 
+<!-- Sponsorship slot: replace the two lines below once the partner's assets
+     (logo / one-line blurb / promo code / UTM link) are in place. -->
+<img src="docs/images/sponsor-slot.svg" alt="sponsor slot" width="880" />
+
+**Sponsored slot · reserved** — the audience here runs Tencent CodeBuddy account pools and is made up of developers.
+<sub>This page carries a sponsored slot. There is **no technical dependency** on sponsors, and a listing is not a recommendation or endorsement of their service.</sub>
+
 <img src="docs/images/dashboard.png" alt="WorkBuddy Manager dashboard" width="100%" />
 
 </div>
@@ -950,28 +957,6 @@ git tag v1.0.1 && git push origin v1.0.1
 
 CI builds the frontend, packages the artifacts, extracts the matching CHANGELOG section as
 release notes, and creates a Release with the archives attached.
-
----
-
-## Sponsor & Promotion
-
-> Disclosure: this is a partner promotion. Deploying this project needs a server that can
-> run Docker; the listing below is for reference. **This repository has no technical
-> dependency on it** — any other provider works just as well.
-
-### Aiwei Cloud (爱维云) — cloud servers, no ICP filing required
-
-[![Aiwei Cloud · lovevps.cn](docs/images/lovevps.png)](https://lovevps.cn/)
-
-**25% off, ongoing** — use promo code **`catfk`** at checkout ｜ <https://lovevps.cn/>
-
-- **No ICP filing, ready in minutes** — Hong Kong (5 zones), US, Japan, Singapore,
-  Malaysia, Germany and more; plus many mainland China locations
-- **Optimised routes** — CN2 / 9929 / BGP premium lines; DDoS-protected plans with
-  200G mitigation
-- **Residential IPs** — native US residential broadband IPs available
-- **Elastic billing** — create and release on demand, resize freely
-- **Credentials** — licensed IDC / ISP / CDN operator (B1-20263321, 苏B2-20263329)
 
 ---
 
