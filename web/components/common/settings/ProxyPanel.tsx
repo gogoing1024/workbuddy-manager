@@ -5,11 +5,14 @@ import {
   Activity,
   Copy,
   Globe,
+  Link2,
   Loader2,
   Pencil,
   Plus,
   RefreshCw,
+  Scale,
   Search,
+  Tag,
   Trash2,
   Upload,
   Users,
@@ -593,41 +596,54 @@ export function ProxyPanel() {
             <DialogTitle>{editing ? t('settings.proxyEdit') : t('settings.proxyAdd')}</DialogTitle>
             <DialogDescription>{t('settings.proxyDialogDesc')}</DialogDescription>
           </DialogHeader>
-          <DialogBody className="space-y-2.5">
-            <div className="rounded-2xl bg-muted/40 px-3 py-2">
-              <Label className="text-xs">{t('settings.proxyName')}</Label>
-              <Input className="mt-1 h-8 bg-background" value={form.name}
-                     disabled={editing !== null}
-                     placeholder={t('settings.proxyNamePlaceholder')}
-                     onChange={(e) => setForm({...form, name: e.target.value})} />
-            </div>
-            <div className="rounded-2xl bg-muted/40 px-3 py-2">
-              <Label className="text-xs">{t('settings.proxyUrl')}</Label>
-              <Input className="mt-1 h-8 bg-background font-mono text-xs" value={form.url}
-                     placeholder="socks5://user:pass@host:10000"
-                     onChange={(e) => setForm({...form, url: e.target.value})} />
-              <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
-                {t('settings.proxyUrlHint')}
+          {/* ⚠️ DialogBody 上只能写结构性类：布局类必须内套一层 div（见 dialog.tsx 注释） */}
+          <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
+            <div className="space-y-3 px-6 pb-2">
+              <div className="rounded-2xl bg-muted/40 px-3.5 py-3">
+                <Label className="gap-1.5 text-xs text-muted-foreground">
+                  <Tag className="h-3 w-3" />
+                  {t('settings.proxyName')}
+                </Label>
+                <Input className="mt-1.5 h-9 bg-background" value={form.name}
+                       disabled={editing !== null}
+                       autoFocus={editing === null}
+                       placeholder={t('settings.proxyNamePlaceholder')}
+                       onChange={(e) => setForm({...form, name: e.target.value})} />
+              </div>
+              <div className="rounded-2xl bg-muted/40 px-3.5 py-3">
+                <Label className="gap-1.5 text-xs text-muted-foreground">
+                  <Link2 className="h-3 w-3" />
+                  {t('settings.proxyUrl')}
+                </Label>
+                <Input className="mt-1.5 h-9 bg-background font-mono text-xs" value={form.url}
+                       placeholder="socks5://user:pass@host:10000"
+                       onChange={(e) => setForm({...form, url: e.target.value})} />
+                <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+                  {t('settings.proxyUrlHint')}
+                </p>
+              </div>
+              <div className="flex items-end gap-3 rounded-2xl bg-muted/40 px-3.5 py-3">
+                <div className="flex-1">
+                  <Label className="gap-1.5 text-xs text-muted-foreground">
+                    <Scale className="h-3 w-3" />
+                    {t('settings.proxyWeight')}
+                  </Label>
+                  <Input className="mt-1.5 h-9 w-28 bg-background text-right tabular-nums"
+                         value={form.weight}
+                         onChange={(e) => setForm({...form, weight: e.target.value})} />
+                </div>
+                <div className="flex h-9 items-center gap-2">
+                  <Switch checked={form.enabled}
+                          onCheckedChange={(v) => setForm({...form, enabled: v})} />
+                  <span className="text-xs text-muted-foreground">
+                    {t('settings.proxyInPool')}
+                  </span>
+                </div>
+              </div>
+              <p className="px-1 text-[10px] leading-4 text-muted-foreground">
+                {t('settings.proxyWeightHint')}
               </p>
             </div>
-            <div className="flex items-center gap-3 rounded-2xl bg-muted/40 px-3 py-2">
-              <div className="flex-1">
-                <Label className="text-xs">{t('settings.proxyWeight')}</Label>
-                <Input className="mt-1 h-8 w-28 bg-background text-right tabular-nums"
-                       value={form.weight}
-                       onChange={(e) => setForm({...form, weight: e.target.value})} />
-              </div>
-              <div className="flex items-center gap-2 pt-4">
-                <Switch checked={form.enabled}
-                        onCheckedChange={(v) => setForm({...form, enabled: v})} />
-                <span className="text-xs text-muted-foreground">
-                  {t('settings.proxyInPool')}
-                </span>
-              </div>
-            </div>
-            <p className="text-[10px] leading-4 text-muted-foreground">
-              {t('settings.proxyWeightHint')}
-            </p>
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" className="rounded-full"
@@ -652,11 +668,13 @@ export function ProxyPanel() {
             <DialogDescription>{t('settings.proxyImportDesc')}</DialogDescription>
           </DialogHeader>
           <DialogBody>
-            <div className="rounded-2xl bg-muted/40 px-3 py-2">
-              <Textarea className="min-h-40 bg-background font-mono text-xs"
-                        value={importing ?? ''}
-                        placeholder={t('settings.proxyImportPlaceholder')}
-                        onChange={(e) => setImporting(e.target.value)} />
+            <div className="px-6 pb-2">
+              <div className="rounded-2xl bg-muted/40 px-3 py-2">
+                <Textarea className="min-h-40 bg-background font-mono text-xs"
+                          value={importing ?? ''}
+                          placeholder={t('settings.proxyImportPlaceholder')}
+                          onChange={(e) => setImporting(e.target.value)} />
+              </div>
             </div>
           </DialogBody>
           <DialogFooter>
@@ -679,19 +697,21 @@ export function ProxyPanel() {
             </DialogTitle>
             <DialogDescription>{t('settings.proxyAutoAssignDesc')}</DialogDescription>
           </DialogHeader>
-          <DialogBody className="space-y-2.5">
-            <div className="flex items-center gap-2 rounded-2xl bg-muted/40 px-3 py-2">
-              <span className="text-xs font-medium">{t('settings.proxyAutoAssign')}</span>
-              <Input className="h-8 w-20 rounded-full bg-background text-center text-xs tabular-nums"
-                     value={autoCount} onChange={(e) => setAutoCount(e.target.value)} />
-              <span className="text-xs text-muted-foreground">
-                {t('settings.proxyAutoAssignUnit')}
-              </span>
+          <DialogBody>
+            <div className="space-y-2.5 px-6 pb-2">
+              <div className="flex items-center gap-2 rounded-2xl bg-muted/40 px-3 py-2">
+                <span className="text-xs font-medium">{t('settings.proxyAutoAssign')}</span>
+                <Input className="h-8 w-20 rounded-full bg-background text-center text-xs tabular-nums"
+                       value={autoCount} onChange={(e) => setAutoCount(e.target.value)} />
+                <span className="text-xs text-muted-foreground">
+                  {t('settings.proxyAutoAssignUnit')}
+                </span>
+              </div>
+              <p className="text-[10px] leading-4 text-muted-foreground">
+                {t('settings.proxyAutoAssignHint', {count: String(
+                  accounts.filter((a) => !a.proxy).length)})}
+              </p>
             </div>
-            <p className="text-[10px] leading-4 text-muted-foreground">
-              {t('settings.proxyAutoAssignHint', {count: String(
-                accounts.filter((a) => !a.proxy).length)})}
-            </p>
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" className="rounded-full" onClick={() => setAutoFor(null)}>
@@ -711,31 +731,33 @@ export function ProxyPanel() {
             <DialogTitle>{t('settings.proxyBindingsManagerTitle')}</DialogTitle>
             <DialogDescription>{t('settings.proxyBindingsManagerDesc')}</DialogDescription>
           </DialogHeader>
-          <DialogBody className="max-h-[26rem] space-y-1.5 overflow-y-auto">
-            {accounts.length === 0 ? (
-              <div className="rounded-2xl bg-muted/40 py-8 text-center text-xs text-muted-foreground">
-                {t('settings.proxyBindingsEmpty')}
-              </div>
-            ) : accounts.map((row) => (
-              <div key={row.file}
-                   className="flex items-center gap-3 rounded-xl bg-muted/40 px-3 py-2">
-                <span className="min-w-0 flex-1 truncate text-xs">
-                  {row.nickname || row.uid}
-                </span>
-                <Select value={row.proxy || '__pool__'}
-                        onValueChange={(v) => void assign(row, v)}>
-                  <SelectTrigger className="h-8 w-56 rounded-full bg-background text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__pool__">{t('settings.proxyFollowPool')}</SelectItem>
-                    {routes.map((r) => (
-                      <SelectItem key={r.name} value={r.name}>{r.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ))}
+          <DialogBody className="max-h-[26rem]">
+            <div className="space-y-1.5 px-6 pb-2">
+              {accounts.length === 0 ? (
+                <div className="rounded-2xl bg-muted/40 py-8 text-center text-xs text-muted-foreground">
+                  {t('settings.proxyBindingsEmpty')}
+                </div>
+              ) : accounts.map((row) => (
+                <div key={row.file}
+                     className="flex items-center gap-3 rounded-xl bg-muted/40 px-3 py-2">
+                  <span className="min-w-0 flex-1 truncate text-xs">
+                    {row.nickname || row.uid}
+                  </span>
+                  <Select value={row.proxy || '__pool__'}
+                          onValueChange={(v) => void assign(row, v)}>
+                    <SelectTrigger className="h-8 w-56 rounded-full bg-background text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__pool__">{t('settings.proxyFollowPool')}</SelectItem>
+                      {routes.map((r) => (
+                        <SelectItem key={r.name} value={r.name}>{r.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ))}
+            </div>
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" className="rounded-full" onClick={() => setBindOpen(false)}>

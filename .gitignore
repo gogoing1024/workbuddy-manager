@@ -134,3 +134,6 @@ local-ops/
 LOCAL_DEPLOY_NOTES.md
 start-all.cmd
 stop-all.cmd
+
+# 本机 VPS 部署脚本，不纳入 Git 版本控制
+/deploy-to-vps.sh
