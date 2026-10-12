@@ -11,6 +11,11 @@ import type {
   Changelog,
   CheckinLogPage,
   ClaimInfo,
+  ProxyProbe,
+  RouteAccountsResponse,
+  ProxyRoute,
+  ProxyRouteList,
+  ProxySettings,
   CreatedApiToken,
   CreatedRedPacket,
   CreditExpiry,
@@ -562,6 +567,50 @@ export const securityApi = {
 };
 
 /* ── 上游配置 / 用户 ───────────────────────────────── */
+/** 代理线路与全局出口代理（设置 → 代理）。凭据一律走服务端的脱敏口径。 */
+export const proxyApi = {
+  routes: (upstreamId?: number | null) =>
+    get<ProxyRouteList>('/api/proxy-routes' + groupQs(upstreamId)),
+  create: (name: string, url: string, weight?: number) =>
+    post<ProxyRoute>('/api/proxy-routes', {name, url, weight}),
+  update: (name: string, body: {url?: string; new_name?: string; weight?: number},
+           upstreamId?: number | null) =>
+    put<ProxyRoute>(`/api/proxy-routes/${encodeURIComponent(name)}` + groupQs(upstreamId), body),
+  remove: (name: string, force: boolean, upstreamId?: number | null) => {
+    // 查询串自己拼：groupQs 只负责分组参数，force 是这条接口特有的
+    const qs = new URLSearchParams();
+    if (upstreamId) qs.set('upstream_id', String(upstreamId));
+    if (force) qs.set('force', '1');
+    const query = qs.toString();
+    return del<{name: string; bound_cleared: number}>(
+      `/api/proxy-routes/${encodeURIComponent(name)}${query ? `?${query}` : ''}`);
+  },
+  import: (text: string) =>
+    post<{imported: number; problems: string[]}>('/api/proxy-routes/import', {text}),
+  probe: (name: string) => post<ProxyProbe>('/api/proxy-routes/probe', {name}),
+  /** 绑定抽屉：全部账号 + 各自当前线路 */
+  accounts: (name: string, upstreamId?: number | null) =>
+    get<RouteAccountsResponse>(
+      `/api/proxy-routes/${encodeURIComponent(name)}/accounts` + groupQs(upstreamId)),
+  /** 批量绑定 / 解绑（池化：一个账号可以同时用多条线路） */
+  bind: (name: string, files: string[], add: boolean, upstreamId?: number | null) =>
+    post<{updated: number; skipped: string[]}>(
+      `/api/proxy-routes/${encodeURIComponent(name)}/accounts` + groupQs(upstreamId),
+      {files, add}),
+  /** 自动分配 N 台账号到这条线路（未绑定的优先，挑完仍可手动增删） */
+  autoAssign: (name: string, count: number, upstreamId?: number | null) =>
+    post<{updated: number; requested: number; candidates: number; unbound_left: number}>(
+      `/api/proxy-routes/${encodeURIComponent(name)}/auto-assign` + groupQs(upstreamId),
+      {count}),
+  /** 换会话（= 换出口 IP）：住宅代理的会话名决定出口 */
+  rotate: (files: string[], upstreamId?: number | null) =>
+    post<{updated: number}>(`/api/proxy-routes/rotate` + groupQs(upstreamId), {files}),
+  settings: () => get<ProxySettings>('/api/settings/proxy'),
+  saveSettings: (body: {http_proxy?: string; update_proxy?: string}) =>
+    put<ProxySettings>('/api/settings/proxy', body),
+  probeGlobal: () => post<ProxyProbe>('/api/settings/proxy/probe', {}),
+};
+
 export const settingsApi = {
   upstream: () => get<UpstreamConfig>('/api/settings/upstream'),
   saveUpstream: (body: Record<string, unknown>) =>

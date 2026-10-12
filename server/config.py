@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -111,6 +113,14 @@ AUDIT_ALL_ACCESS = _env('WB_AUDIT_ALL_ACCESS', '0') == '1'
 # 留空时所有请求都不使用任何代理：httpx 默认 trust_env=True 会读取系统/环境代理，
 # 会把内网请求（如 127.0.0.1:7863）也交给系统代理，导致连接被劫持或长时间超时。
 HTTP_PROXY = _env('WB_HTTP_PROXY', '')
+# 线路池的粘性窗口（秒）：同一账号在这个窗口内固定走上次那条线路
+# （一会儿换一个出口在风控眼里就是特征）。0 = 每次都重新按权重挑。
+try:
+    PROXY_STICKY_SECONDS = int(_env('WB_PROXY_STICKY_SECONDS', '1800') or '0')
+except ValueError:            # 环境变量写错不该让面板起不来
+    PROXY_STICKY_SECONDS = 1800
+# 出口代理探测用的地址（界面上「测试」按钮；默认回出口 IP 与归属地）
+PROXY_PROBE_URL = _env('WB_PROXY_PROBE_URL', 'https://ipinfo.io/json')
 DEFAULT_ACCOUNT_PROXY = _env('WB_DEFAULT_ACCOUNT_PROXY', '')
 
 # 本机一键导入：允许把新密钥直接写进**本机的** cc-switch / ZCode 配置。
@@ -183,34 +193,187 @@ def upstream_api_key() -> str:
         return ''
 
 
-def proxy_routes() -> dict[str, str]:
-    """读取共享命名线路。客户端只能取得线路名，不能取得代理凭据。"""
+SESSION_PLACEHOLDER = '{account}'
+
+
+def _raw_routes() -> dict[str, dict]:
+    """线路表的**原始**形态：名字 → {url, weight}。
+
+    值允许两种写法：`"名字": "地址"`（老写法，权重按默认 100）或
+    `"名字": {"url": "地址", "weight": 30}`（多家线路按权重分摊时用）。
+    """
     try:
-        routes = json.loads(UPSTREAM_CONFIG.read_text(encoding='utf-8')).get('proxies') or {}
+        table = json.loads(UPSTREAM_CONFIG.read_text(encoding='utf-8')).get('proxies') or {}
     except (OSError, ValueError, AttributeError):
         return {}
-    if not isinstance(routes, dict):
+    if not isinstance(table, dict):
         return {}
-    return {k: v for k, v in routes.items()
-            if isinstance(k, str) and k.strip() and isinstance(v, str)}
+    out: dict[str, dict] = {}
+    for name, value in table.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                out[name] = {'url': value, 'weight': 100}
+        elif isinstance(value, dict):
+            url = value.get('url')
+            if not isinstance(url, str) or not url.strip():
+                continue
+            weight = value.get('weight', 100)
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight <= 0:
+                weight = 100
+            out[name] = {'url': url, 'weight': int(weight)}
+    return out
 
 
-def account_proxy(auth: dict) -> str | None:
-    """无绑定时沿用既有出口；绑定无效时拒绝发出请求。"""
-    name = str(auth.get('proxy') or '').strip()
-    if not name:
-        return None
-    url = proxy_routes().get(name)
-    if not url:
-        raise ValueError(f'账号绑定的代理线路 {name!r} 不存在')
+def proxy_routes() -> dict[str, str]:
+    """读取共享命名线路（名字 → 地址）。客户端只能取得线路名，不能取得凭据。"""
+    return {name: entry['url'] for name, entry in _raw_routes().items()}
+
+
+def proxy_route_weights() -> dict[str, int]:
+    """线路名 → 权重（池化选择时按它分摊；老写法默认 100）。"""
+    return {name: entry['weight'] for name, entry in _raw_routes().items()}
+
+
+def _validate_route(name: str, url: str) -> None:
     try:
         parsed = urlsplit(url)
-        valid = parsed.scheme in ('http', 'https') and bool(parsed.hostname) and parsed.port != 0
+        # socks5 / socks5h 由 httpx + socksio 支持（socks5h 把域名解析交给代理）。
+        # socks4/socks4a 实测 httpx 直接报 Unknown scheme，不放进来。
+        valid = (parsed.scheme in ('http', 'https', 'socks5', 'socks5h')
+                 and bool(parsed.hostname) and parsed.port != 0)
     except ValueError:
         valid = False
     if not valid:
-        raise ValueError(f'代理线路 {name!r} 配置无效（需要 HTTP/HTTPS 代理）')
-    return url
+        raise ValueError(f'代理线路 {name!r} 配置无效（需要 HTTP/HTTPS/SOCKS5 代理）')
+
+
+def route_session_name(auth: dict) -> str:
+    """这个账号在会话模板里用的会话名。
+
+    优先用账号文件里**存下来的** `proxy_session`（绑定或轮换时生成），其次按昵称
+    取 slug，最后退回 uid 前缀。为什么存下来：模板里的会话名决定出口 IP，而昵称
+    是可改的 —— 直接按昵称现算，用户改个昵称就会**悄悄换掉出口 IP**（在风控眼里
+    是特征变化）。存下来的值可以在界面上显式「换会话」（= 换 IP）。
+    """
+    stored = str(auth.get('proxy_session') or '').strip()
+    if stored:
+        return stored
+    nickname = str(auth.get('nickname') or '').strip()
+    # 只留 ASCII 字母数字：住宅代理的用户名里带中文会被百分号编码，多数服务商不认
+    # （面板里可以随时把这个会话名改成好记的名字 —— 见「绑定账号」抽屉）。
+    slug = ''.join(ch.lower() if (ch.isascii() and ch.isalnum()) else '-'
+                   for ch in nickname)
+    while '--' in slug:
+        slug = slug.replace('--', '-')
+    slug = slug.strip('-')[:24]
+    if len(slug) >= 3:
+        return slug
+    uid = str(auth.get('uid') or '').strip()
+    return uid[:8] or 'acct'
+
+
+def render_route_url(template: str, session: str) -> str:
+    """把 `{account}` 换成这个账号的会话名。没有占位符就原样返回（= 共享一条出口）。"""
+    return template.replace(SESSION_PLACEHOLDER, session) if SESSION_PLACEHOLDER in template \
+        else template
+
+
+def route_is_exclusive(url: str) -> bool:
+    """带 `{account}` 的线路是**独享**（每个账号一个会话 = 一个住宅 IP）。"""
+    return SESSION_PLACEHOLDER in url
+
+
+def _pick_weighted(names: list[str], weights: dict[str, int]) -> str:
+    total = sum(max(1, int(weights.get(n, 100))) for n in names)
+    point = secrets.randbelow(total)
+    for name in names:
+        point -= max(1, int(weights.get(name, 100)))
+        if point < 0:
+            return name
+    return names[-1]
+
+
+def resolve_account_proxy(auth: dict) -> str | None:
+    """这个账号这次该用哪条线路（已渲染好会话名）。
+
+    选择规则（P1 池化）：
+      · 账号可以绑**一组**线路（`proxy_pool`）或单条（`proxy`）；
+      · 同一条粘性窗口内固定走上次那条 —— 一会儿换一个出口在风控眼里就是特征
+        （mihomo 的 sticky-sessions 是同一个道理），所以选择结果按 uid 存在设置里；
+      · 窗口到期或上次那条已不可用时，按**权重**重新挑一条。
+
+    绑定无效（名字不存在 / 地址非法）时抛错而不是悄悄直连：出口被悄悄换掉比报错
+    危险得多（与既有 `account_proxy` 的口径一致）。
+    """
+    names: list[str] = []
+    single = str(auth.get('proxy') or '').strip()
+    pool = auth.get('proxy_pool')
+    if isinstance(pool, (list, tuple)):
+        names = [str(n).strip() for n in pool if str(n).strip()]
+        if single and single not in names:
+            names.insert(0, single)
+    elif single:
+        names = [single]
+    if not names:
+        return None
+
+    # 走公开访问器（而不是自己重读文件）：既有的调用点/测试都按这两个函数打桩，
+    # 服务层绕过它们会让「线路表长什么样」出现第二个真相来源。
+    table = {name: {'url': url, 'weight': proxy_route_weights().get(name, 100)}
+             for name, url in proxy_routes().items()}
+    known = [n for n in names if n in table]
+    if not known:
+        raise ValueError(f'账号绑定的代理线路 {names[0]!r} 不存在')
+
+    chosen = _sticky_choice(auth, known)
+    url = table[chosen]['url']
+    _validate_route(chosen, url)
+    return render_route_url(url, route_session_name(auth))
+
+
+def _sticky_choice(auth: dict, names: list[str]) -> str:
+    """在窗口内沿用上次的选择；否则按权重重挑并记下。"""
+    weights = proxy_route_weights()
+    if len(names) == 1:
+        return names[0]
+    uid = str(auth.get('uid') or '').strip() or '?'
+    window = max(0, int(PROXY_STICKY_SECONDS))
+    if window:
+        try:
+            from . import db
+            table = db.get_setting('proxy_sticky', {}) or {}
+        except Exception:            # noqa: BLE001 —— 读不到就当没有粘性，不影响出站
+            table = {}
+        entry = table.get(uid) if isinstance(table, dict) else None
+        if isinstance(entry, dict):
+            last = str(entry.get('route') or '')
+            at = int(entry.get('at') or 0)
+            if last in names and time.time() - at < window:
+                return last
+    chosen = _pick_weighted(names, weights)
+    if window:
+        try:
+            from . import db
+            table = db.get_setting('proxy_sticky', {}) or {}
+            if not isinstance(table, dict):
+                table = {}
+            table[uid] = {'route': chosen, 'at': int(time.time())}
+            # 只留最近 2000 条：账号池再大也不会无限膨胀（粘性过期后自然被覆盖）
+            if len(table) > 2000:
+                keep = sorted(table.items(), key=lambda kv: int(kv[1].get('at') or 0),
+                              reverse=True)[:2000]
+                table = dict(keep)
+            db.set_setting('proxy_sticky', table)
+        except Exception:            # noqa: BLE001 —— 写不进去只是少了粘性
+            pass
+    return chosen
+
+
+def account_proxy(auth: dict) -> str | None:
+    """无绑定时沿用既有出口；绑定无效时拒绝发出请求（对外保持原签名）。"""
+    return resolve_account_proxy(auth)
 
 
 def new_secret() -> str:
@@ -270,12 +433,66 @@ def _timeout_key(tmo) -> tuple:  # noqa: ANN001
     return (tmo.connect, tmo.read, tmo.write, tmo.pool)
 
 
+_INTERNAL_SUFFIXES = ('.local', '.internal', '.lan', '.docker', '.localhost')
+
+
+def _is_internal_host(host: str | None) -> bool:
+    """这个目标算不算「内网 / 本机」——算的话不该交给外部代理。
+
+    覆盖三类：回环与常见内网别名、私有 / 链路本地 / 保留网段的 IP、**单标签主机名**
+    （容器服务名 `workbuddy2api` 这类；公网域名一定带点）。
+    """
+    h = (host or '').strip().lower().rstrip('.')
+    if not h:
+        return False
+    if h in ('localhost', 'host.docker.internal', 'host.containers.internal'):
+        return True
+    if h.endswith(_INTERNAL_SUFFIXES) or '.' not in h:
+        # 单标签 = 内网 DNS（容器服务名、`myhost` 之类）。公网目标必然带点。
+        return True
+    try:
+        addr = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_unspecified)
+
+
+def _proxy_transport(proxy: str):  # noqa: ANN202
+    """「内网/本机直连、其余走代理」的 httpx transport。
+
+    用自定义 transport 而不是 `mounts=`：mounts 只能按主机名模式匹配，表达不了
+    「私有网段」「单标签主机名」这两类，而它们恰恰是容器部署的常态（`workbuddy2api`、
+    `host.docker.internal`、`10.x`…）。
+
+    类建在这里而不是模块顶层，是因为 httpx 在本模块是**按需导入**的（保持冷启动
+    不加载它）；每个 (循环, 超时, 代理) 组合只建一次客户端，这点构造开销可忽略。
+    """
+    import httpx
+
+    class _DirectForInternalTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self._proxied = httpx.AsyncHTTPTransport(proxy=proxy)
+            self._direct = httpx.AsyncHTTPTransport()
+
+        async def handle_async_request(self, request):  # noqa: ANN001, ANN201
+            transport = (self._direct if _is_internal_host(request.url.host)
+                         else self._proxied)
+            return await transport.handle_async_request(request)
+
+        async def aclose(self) -> None:
+            await self._proxied.aclose()
+            await self._direct.aclose()
+
+    return _DirectForInternalTransport()
+
+
 def _build_client(tmo, proxy: str | None):  # noqa: ANN001, ANN202
     import httpx
 
     kwargs: dict = {'timeout': tmo, 'trust_env': False}
     if proxy:
-        kwargs['proxy'] = proxy
+        kwargs['transport'] = _proxy_transport(proxy)
     return httpx.AsyncClient(**kwargs)
 
 
@@ -305,6 +522,26 @@ def _evict(loop) -> None:  # noqa: ANN001
             continue
 
 
+def stored_http_proxy() -> str:
+    """面板设置里存的出口代理；空串 = 没设过（回落到环境变量）。"""
+    try:
+        from . import db          # 延迟导入：config 被 db 反过来 import，顶层会成环
+        value = db.get_setting('http_proxy', '')
+    except Exception:             # noqa: BLE001 —— 读不到就当没设过，别让出站挂掉
+        return ''
+    return str(value or '').strip()
+
+
+def effective_http_proxy() -> str:
+    """当前生效的出口代理：**面板设置优先，其次环境变量**。
+
+    为什么要这一层：`WB_HTTP_PROXY` 是环境变量，界面上填不了（容器里还得改
+    compose）。有了它，页面上的设置改完立即生效（客户端池按代理串缓存，
+    新值自然建新客户端），环境变量仍作为兜底与「未设置」时的默认。
+    """
+    return stored_http_proxy() or HTTP_PROXY
+
+
 def http_client(timeout, *, connect: float | None = None, proxy: str | None = None):
     """统一的 httpx 客户端：默认忽略系统/环境代理，避免内网请求被代理劫持。
 
@@ -326,7 +563,7 @@ def http_client(timeout, *, connect: float | None = None, proxy: str | None = No
         tmo = httpx.Timeout(timeout, connect=connect)
     else:
         tmo = httpx.Timeout(timeout)
-    selected_proxy = HTTP_PROXY if proxy is None else proxy
+    selected_proxy = effective_http_proxy() if proxy is None else proxy
 
     try:
         loop = asyncio.get_running_loop()
