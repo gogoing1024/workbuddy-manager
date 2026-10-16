@@ -276,6 +276,94 @@ const realmOf = (name) => {
 step(realmOf('不限版本-验证') === '未限定', '勾了开关建出来的密钥是「未限定」', realmOf('不限版本-验证'));
 step(realmOf('跟随页面版本-验证') === '国内版', '没勾时仍跟随当前页面版本（国内版）', realmOf('跟随页面版本-验证'));
 
+// ═══ 任务页「每日领补偿」（活动补偿自动领取） ═══
+console.log('\n── 任务页 › 每日领补偿');
+await page.goto(`${BASE}/tasks`, {waitUntil: 'load'});
+await page.waitForTimeout(3000);
+await page.screenshot({path: path.join(OUT, 'tasks-compensation.png'), fullPage: true});
+
+{
+  // 按标签文字定位那一行（行内应有：开关 / 标签 / 整点下拉 / 立即执行）
+  const rowHandle = await page.evaluateHandle(() => {
+    const label = Array.from(document.querySelectorAll('*')).find(
+      (el) => el.children.length === 0 && (el.textContent || '').trim() === '每日领补偿');
+    let node = label;
+    while (node && !(node.querySelector?.('[role=switch]') && node.querySelector?.('button'))) {
+      node = node.parentElement;
+    }
+    return node || null;
+  });
+  const row = rowHandle.asElement();
+  step(!!row, '计划任务里有「每日领补偿」这一行');
+  if (row) {
+    const sw = await row.$('[role=switch]');
+    const on = sw && await sw.evaluate(
+      (el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-state') === 'checked');
+    step(!on, '它默认**不**自动跑（上游每日任务本来就会领；这一行主打手动「立即执行」）');
+
+    // **不能**用 row.$('button')：行内第一个 button 就是那个开关（Radix Switch 也是
+    // button 元素），点它会切开关而不是执行任务（第一次跑就点错了，还看不出异常）。
+    const btn = await row.$('button:has-text("立即执行")');
+    step(!!btn, '这一行有「立即执行」按钮');
+    if (btn) {
+      await btn.click();
+      // 轮询而不是「等 4 秒再看」：sonner 的 toast 默认约 4 秒就消失，
+      // 固定等待正好会错过它。
+      let toasts = '';
+      for (let i = 0; i < 30 && !toasts; i++) {
+        await page.waitForTimeout(250);
+        toasts = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('[data-sonner-toast]'))
+            .map((el) => (el.textContent || '').trim()).filter(Boolean).join(' | '));
+      }
+      step(toasts.includes('1 个领到 +500 积分'),
+           '点「立即执行」后回报「1 个领到 +500 积分」（走的是 mock 的补偿接口）',
+           toasts.slice(0, 160));
+    }
+  }
+
+  // 再直接打一次接口：即使界面那条 toast 被改动，这条也能独立证明
+  // 「面板 → 腾讯补偿接口 → 汇总回执」这条链是通的。
+  const direct = await api('POST', '/api/accounts/daily-plan/run', {task: 'compensation'});
+  step(direct.status === 200 && String(direct.body?.message || '').includes('1 个领到 +500 积分'),
+       '直接调 /api/accounts/daily-plan/run 也回报领到 500',
+       JSON.stringify(direct.body).slice(0, 180));
+}
+
+// ═══ 账号页「强制冷却」对话框 ═══
+// 只验界面：点了会真的去停/起上游（harness 里没有 docker），所以**不提交**，
+// 只确认按钮在、弹窗能开、档位与「永久」都在。
+console.log('\n── 账号页 › 强制冷却');
+await page.goto(`${BASE}/accounts`, {waitUntil: 'load'});
+await page.waitForTimeout(2500);
+await page.screenshot({path: path.join(OUT, 'accounts-cooling.png'), fullPage: true});
+
+{
+  // 先确认账号行真的渲染了 —— 否则「按钮找不到」会被误读成功能没接上
+  const pageText = await page.evaluate(() => document.body.innerText);
+  step(pageText.includes('演示号'), '账号列表里有那个演示账号');
+
+  // 标题按 zh-CN 文案精确匹配（「强制进入冷却」/「调整冷却时间」）。
+  // 不能只用 [title*=冷却]：行内还有「清除冷却」，会命中错的那个按钮。
+  // 也必须加 `:visible` —— 账号页同时渲染**移动卡片**（md:hidden）与**桌面表**
+  // （hidden md:block），不加就会点到 1600px 下被 display:none 的那一份，
+  // 表现为「元素不可见」的点击超时（第一次跑就是这样）。
+  const snowflake = page.locator(
+    'button[title="强制进入冷却"]:visible, button[title="调整冷却时间"]:visible').first();
+  step(await snowflake.count() > 0, '账号行上有「强制进入冷却」按钮（雪花）');
+  if (await snowflake.count() > 0) {
+    await snowflake.click();
+    await page.waitForTimeout(700);
+    const dialog = page.locator('[role=dialog]').last();
+    const text = await dialog.textContent().catch(() => '');
+    step(!!text && text.includes('永久'), '弹窗里有「永久」档', (text || '').slice(0, 80));
+    step(!!text && /(小时|分钟|天)/.test(text), '弹窗里有自定义时长输入');
+    await page.screenshot({path: path.join(OUT, 'accounts-cooling-dialog.png')});
+    await page.keyboard.press('Escape');   // 不提交：真实停/起上游不在这里做
+    await page.waitForTimeout(400);
+  }
+}
+
 // ═══ 控制台 ═══
 console.log('\n── 控制台');
 step(consoleErrors.length === 0, '浏览器控制台没有报错', consoleErrors.slice(0, 3).join(' | '));
