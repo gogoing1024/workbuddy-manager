@@ -622,27 +622,29 @@ export function ProxyPanel() {
                   {t('settings.proxyUrlHint')}
                 </p>
               </div>
-              <div className="flex items-end gap-3 rounded-2xl bg-muted/40 px-3.5 py-3">
-                <div className="flex-1">
-                  <Label className="gap-1.5 text-xs text-muted-foreground">
+              <div className="rounded-2xl bg-muted/40 px-3.5 py-3">
+                <div className="flex items-center gap-3">
+                  <Label className="shrink-0 gap-1.5 text-xs text-muted-foreground">
                     <Scale className="h-3 w-3" />
                     {t('settings.proxyWeight')}
                   </Label>
-                  <Input className="mt-1.5 h-9 w-28 bg-background text-right tabular-nums"
+                  <Input className="h-9 w-28 bg-background tabular-nums"
+                         inputMode="numeric"
                          value={form.weight}
                          onChange={(e) => setForm({...form, weight: e.target.value})} />
+                  <label className="ml-auto flex cursor-pointer items-center gap-2">
+                    <Switch checked={form.enabled}
+                            aria-label={t('settings.proxyInPool')}
+                            onCheckedChange={(v) => setForm({...form, enabled: v})} />
+                    <span className="text-xs text-muted-foreground">
+                      {t('settings.proxyInPool')}
+                    </span>
+                  </label>
                 </div>
-                <div className="flex h-9 items-center gap-2">
-                  <Switch checked={form.enabled}
-                          onCheckedChange={(v) => setForm({...form, enabled: v})} />
-                  <span className="text-xs text-muted-foreground">
-                    {t('settings.proxyInPool')}
-                  </span>
-                </div>
+                <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+                  {t('settings.proxyWeightHint')}
+                </p>
               </div>
-              <p className="px-1 text-[10px] leading-4 text-muted-foreground">
-                {t('settings.proxyWeightHint')}
-              </p>
             </div>
           </DialogBody>
           <DialogFooter>
