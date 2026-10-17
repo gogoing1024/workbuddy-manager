@@ -162,6 +162,15 @@ export const accountApi = {
     put<{ok: boolean; proxy: string; reload_triggered: boolean}>(
       `/api/accounts/${encodeURIComponent(filename)}/proxy` + groupQs(upstreamId), {proxy}),
   /**
+   * 设置 / 清除账号手写权重（issue #187）。`weight = 0` 表示恢复默认（1.0）。
+   *
+   * 写的是上游 auth 文件顶层 `weight`（不是本端库）：选号发生在上游，它必须能读到。
+   * 后端会顺带请求重载上游 —— 权重和线路一样是**加载时**解析进内存的。
+   */
+  setWeight: (filename: string, weight: number, upstreamId?: number | null) =>
+    put<{ok: boolean; weight: number; reload_triggered: boolean}>(
+      `/api/accounts/${encodeURIComponent(filename)}/weight` + groupQs(upstreamId), {weight}),
+  /**
    * 某分组的账号列表。upstreamId 省略 / null = 默认分组。
    *
    * 「分组」= 一套上游实例（账号池）：账号文件读该分组的目录、运行状态问该
@@ -691,6 +700,11 @@ export const systemApi = {
   /** 检测新版本；force=true 绕过 6 小时缓存 */
   checkUpdate: (force = false) => get<UpdateCheck>('/api/system/check-update', {force}),
   versions: () => get<Versions>('/api/system/versions'),
+  /** GitHub Token（版本检测 / 一键更新的认证）：读回掩码，写只传明文 */
+  githubToken: () => get<{configured: boolean; masked: string; source: 'env' | 'panel' | ''}>(
+    '/api/settings/github-token'),
+  saveGithubToken: (token: string) =>
+    put<{configured: boolean; masked: string}>('/api/settings/github-token', {token}),
   /**
    * 启动一键更新；target: manager | upstream | both。
    * source='uploaded' 用面板里已上传的离线升级包（issue #153）。

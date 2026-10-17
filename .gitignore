@@ -144,3 +144,7 @@ stop-all.cmd
 
 # 本机 VPS 部署脚本，不纳入 Git 版本控制
 /deploy-to-vps.sh
+
+# 权重任务验收（verify_weight_task_ui.py）的临时数据与截图
+dev/.weight-task
+dev/.shots-weight-task
