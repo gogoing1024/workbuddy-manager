@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   DownloadCloud,
+  Globe,
   Loader2,
   Pin,
   RefreshCw,
@@ -19,7 +20,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import {errText, systemApi} from '@/lib/api';
-import type {UpdateCheck, UpdatePackageMeta, UpdateStatus} from '@/lib/types';
+import type {GithubMirror, UpdateCheck, UpdatePackageMeta, UpdateStatus} from '@/lib/types';
 import {notify} from '@/lib/toast';
 import {fmtAgo, fmtDateTime} from '@/lib/format';
 import {useAuth} from '@/lib/auth-context';
@@ -166,9 +167,17 @@ export function UpdatePanel() {
   const [gh, setGh] = useState<{configured: boolean; masked: string; source: 'env' | 'panel' | ''} | null>(null);
   const [ghInput, setGhInput] = useState('');
   const [ghBusy, setGhBusy] = useState(false);
+  /** GitHub 镜像（issue #216）：国内机器直连超时时用它加速 */
+  const [mirror, setMirror] = useState<GithubMirror | null>(null);
+  const [mirrorInput, setMirrorInput] = useState('');
+  const [mirrorBusy, setMirrorBusy] = useState(false);
 
   useEffect(() => {
     systemApi.githubToken().then(setGh).catch(() => setGh(null));
+    systemApi.githubMirror().then((m) => {
+      setMirror(m);
+      setMirrorInput(m.stored);
+    }).catch(() => setMirror(null));
   }, []);
 
   const saveGh = useCallback(async (token: string) => {
@@ -183,6 +192,22 @@ export function UpdatePanel() {
       notify.err(errText(e));
     } finally {
       setGhBusy(false);
+    }
+  }, [t]);
+
+  const saveMirror = useCallback(async (value: string) => {
+    setMirrorBusy(true);
+    try {
+      const r = await systemApi.saveGithubMirror(value);
+      setMirror(r);
+      setMirrorInput(r.stored);
+      notify.ok(value.trim() ? t('updatePanel.mirrorSaved') : t('updatePanel.mirrorCleared'));
+      // 换了取版本的路子，缓存里的结论就不作数了
+      await recheck();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setMirrorBusy(false);
     }
   }, [t]);
 
@@ -398,6 +423,25 @@ export function UpdatePanel() {
                     <span className="font-medium text-foreground">{check.manager.latest}</span>
                   </div>
                 )}
+                {/* 更新前就能看到 Release 正文：像「需要配套上游」这种要求，
+                    等装完再翻本地 CHANGELOG 已经晚了（issue #217）。 */}
+                {check.manager.has_update && !!check.manager.release_notes && (
+                  <details className="group text-[11px]">
+                    <summary className="cursor-pointer list-none text-foreground/80">
+                      <span className="group-open:hidden">{t('updatePanel.releaseNotes')}</span>
+                      <span className="hidden group-open:inline">{t('updatePanel.hideReleaseNotes')}</span>
+                    </summary>
+                    <pre className="mt-1 max-h-[220px] overflow-auto whitespace-pre-wrap break-all rounded-xl bg-background/60 p-2 font-sans leading-relaxed text-muted-foreground">
+                      {check.manager.release_notes}
+                    </pre>
+                  </details>
+                )}
+                {check.manager.has_update && check.manager.upstream_changed && (
+                  <div className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{t('updatePanel.upstreamChanged')}</span>
+                  </div>
+                )}
                 {/* 产物未就位：版本可见但没有 .tar.gz 时点更新只会拿到 404。先说清楚、
                     并把按钮收起来（issue #127/#129 是同一类窗口期问题）。产物上传后
                     最迟五分钟、或点一次刷新就会恢复。 */}
@@ -490,12 +534,20 @@ export function UpdatePanel() {
                   className="rounded-full"
                   // 产物未就位时不放行：这条路必然以 404 收场，让用户点了再失败只是把
                   // 同一条信息换个地方说（见上方提示）。
-                  disabled={!isAdmin || busy || running || check.manager.assets_ready === false}
-                  title={check.manager.assets_ready === false ? t('updatePanel.assetsPending') : undefined}
+                  disabled={!isAdmin || busy || running || check.manager.assets_ready === false
+                    || (!!check.manager.upstream_changed && status?.can_update_upstream === false)}
+                  title={check.manager.assets_ready === false
+                    ? t('updatePanel.assetsPending')
+                    : check.manager.upstream_changed && status?.can_update_upstream === false
+                      ? t('updatePanel.dockerNote')
+                      : undefined}
                   onClick={async () => {
                     setBusy(true);
                     try {
-                      const r = await systemApi.startUpdate('manager');
+                      // 本次发布带了不同的上游：一起更新，避免「面板升了、上游没升」
+                      // 的版本错配（issue #217）。否则维持原来的只换面板。
+                      const r = await systemApi.startUpdate(
+                        check.manager.upstream_changed ? 'both' : 'manager');
                       notify.ok(t('updatePanel.updateStarted'), r.message);
                       await load();
                     } catch (e) {
@@ -506,7 +558,8 @@ export function UpdatePanel() {
                   }}
                 >
                   <DownloadCloud />
-                  {t('updatePanel.updateManager')}
+                  {check.manager.upstream_changed
+                    ? t('updatePanel.updateBoth') : t('updatePanel.updateManager')}
                 </Button>
               )}
             </div>
@@ -551,6 +604,62 @@ export function UpdatePanel() {
               : gh?.configured
                 ? t('updatePanel.ghConfigured', {masked: gh.masked})
                 : t('updatePanel.ghNotSet')}
+          </div>
+        </div>
+      )}
+
+      {/* GitHub 镜像（issue #216）：国内机器直连 GitHub 超时时用它加速 */}
+      {isAdmin && (
+        <div className="rounded-[20px] bg-muted p-4">
+          <div className="mb-1 text-xs font-medium">{t('updatePanel.mirrorTitle')}</div>
+          <div className="mb-2 text-[11px] leading-4 text-muted-foreground">
+            <RichText text={t('updatePanel.mirrorDesc')} />
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[16rem] flex-1 space-y-1">
+              <Input
+                value={mirrorInput}
+                onChange={(e) => setMirrorInput(e.target.value)}
+                placeholder="https://gh-proxy.com/"
+                aria-label={t('updatePanel.mirrorTitle')}
+                className="h-8 bg-background font-mono text-xs"
+                autoComplete="off"
+              />
+            </div>
+            <Button size="sm" className="rounded-full" disabled={mirrorBusy}
+                    onClick={() => void saveMirror(mirrorInput.trim())}>
+              <Globe className="h-3.5 w-3.5" />
+              {t('common.save')}
+            </Button>
+            {mirror?.stored && (
+              <Button size="sm" variant="outline" className="rounded-full" disabled={mirrorBusy}
+                      onClick={() => void saveMirror('')}>
+                <Trash2 className="h-3.5 w-3.5" />
+                {t('updatePanel.mirrorClear')}
+              </Button>
+            )}
+          </div>
+          {!!mirror?.presets?.length && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] text-muted-foreground">{t('updatePanel.mirrorPresets')}</span>
+              {mirror.presets.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className="rounded-full bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                  onClick={() => setMirrorInput(p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="mt-2 text-[11px] leading-4 text-muted-foreground">
+            {mirror?.source === 'env'
+              ? t('updatePanel.mirrorFromEnv', {value: mirror.env_mirror})
+              : mirror?.mirror
+                ? t('updatePanel.mirrorActive', {value: mirror.mirror})
+                : t('updatePanel.mirrorNone')}
           </div>
         </div>
       )}
