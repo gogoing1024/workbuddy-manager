@@ -19,8 +19,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import logging
+
 from .. import config, db
 from .errtext import err_text
+
+logger = logging.getLogger(__name__)
 
 STATUS_FILE = config.DATA_DIR / 'update-status.json'
 # docker 可用性缓存（(时间, 布尔)）。每次探测要跑 docker info（~50ms），
@@ -164,6 +168,20 @@ def can_control_docker() -> bool:
     return ok
 
 
+# 代理地址里的 userinfo（`http://user:pass@host`）。日志与状态文件会经
+# /api/system/update-status 返回给登录用户，凭据不能就这么露出去。
+_PROXY_CRED_RE = re.compile(r'(?i)(https?|socks5h?|socks4)://[^/@\s]+@')
+
+
+def redact_credentials(text: str) -> str:
+    """把文本里的 `scheme://user:pass@host` 脱敏成 `scheme://***@host`。
+
+    用于更新日志的出口（读状态、tail 日志）。写入口也在脱敏（update.py 的
+    redact_proxy），这里是**存量文件**的兜底 —— 旧版本已经写进去的日志同样会被洗。
+    """
+    return _PROXY_CRED_RE.sub(lambda m: f'{m.group(1)}://***@', str(text))
+
+
 def read_status() -> dict:
     """读取进度；附上当前版本与是否正在运行。"""
     container = in_container()
@@ -215,6 +233,10 @@ def read_status() -> dict:
 
     if _lock_active():
         status['running'] = True
+    # 出口兜底：旧版本写在 update-status.json 里的日志可能带过凭据，读取时统一洗一遍。
+    logs = status.get('logs')
+    if isinstance(logs, list):
+        status['logs'] = [redact_credentials(x) for x in logs]
     return status
 
 
@@ -341,6 +363,42 @@ def _pid_alive_windows(pid_int: int) -> bool:
         return exit_code.value == STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _claim_lock() -> bool:
+    """原子抢占更新锁：True = 抢到，False = 已有任务 / 无法创建。
+
+    为什么不能「先 _lock_active() 再等 spawn 之后写锁」：两次检查之间的窗口里，
+    第二个请求同样能通过检查，于是两个更新进程同时替换 server/（审计
+    2026-10-18 的 check-then-spawn 竞态）。O_CREAT|O_EXCL 让「检查 + 占用」
+    成为一次原子操作。
+
+    占位先写面板 pid，spawn 成功后改写为 worker pid —— `_lock_active` 按
+    「pid 存活 + mtime 未超 TTL」判活，占位只是极短窗口内的安全值。
+    """
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # 顺手清掉已失效的旧锁（进程没了 / 超过 TTL）；清理与创建之间仍可能竞争，
+    # 所以创建本身必须是原子的。
+    _lock_active()
+    try:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except OSError as exc:  # noqa: BLE001
+        logger.warning('无法创建更新锁：%s', err_text(exc))
+        return False
+    try:
+        os.write(fd, str(os.getpid()).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+def _release_lock() -> None:
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _lock_active() -> bool:
@@ -534,6 +592,11 @@ def start_update(target: str, *, source: str = 'release') -> tuple[bool, str]:
         if package_expected:
             env['WB_UPDATE_PACKAGE_SHA256'] = package_expected
 
+    # 原子抢占：到这里所有前置校验都过了，下一行就是 spawn。抢不到说明另一个
+    # 请求刚好抢先（上面的 _lock_active 只是快速失败，两个请求可以同时通过）。
+    if not _claim_lock():
+        return False, '已有更新任务正在执行'
+
     try:
         logfh = open(LOG_FILE, 'ab')
     except Exception:  # noqa: BLE001
@@ -551,6 +614,7 @@ def start_update(target: str, *, source: str = 'release') -> tuple[bool, str]:
    if os.name == 'nt' else {'start_new_session': True}),
         )
     except Exception as exc:  # noqa: BLE001
+        _release_lock()   # 抢到锁但没起来：必须放掉，否则界面永远显示「已有任务」
         return False, f'启动更新失败：{err_text(exc)}'
     finally:
         try:
@@ -562,6 +626,7 @@ def start_update(target: str, *, source: str = 'release') -> tuple[bool, str]:
     _write_initial_status(target, proc.pid)
 
     try:
+        # 锁里换成 worker 的 pid：_lock_active 靠它判断「更新进程还在不在」。
         LOCK_FILE.write_text(str(proc.pid), encoding='utf-8')
     except Exception:  # noqa: BLE001
         pass
@@ -592,7 +657,8 @@ def tail_log(lines: int = 80) -> str:
         return ''
     try:
         content = LOG_FILE.read_text(encoding='utf-8', errors='replace').splitlines()
-        return '\n'.join(content[-lines:])
+        tail = '\n'.join(content[-lines:])
+        return redact_credentials(tail)
     except Exception:  # noqa: BLE001
         return ''
 
