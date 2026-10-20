@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+import datetime
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +22,8 @@ from .filelock import file_lock
 from . import realm as _realm
 from .errtext import err_text
 from .realm import realm_of, supports_checkin
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_file(filename: str, auth_dir: Path | None = None) -> Path:
@@ -739,6 +743,41 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
             pass
 
 
+# 强制冷却写入 manual_reason 的固定前缀。上游签到只会重置 until，不会碰
+# manual_disabled；到期清理必须能区分「强制冷却留下的状态位」与用户主动
+# 摘流量的 manual_disabled，只清前者。
+#
+# **到期时间必须从 manual_reason 里读，不能读 until**：上游签到
+# `ReenableIfCredits` 会把 until 重置成零值（这正是 manual_disabled 要防的
+# 那条路径），拿 until 判断到期会在签到后立刻把冷却清掉，等于白做。
+_MANUAL_COOLING_PREFIX = '手动冷却'
+_MANUAL_COOLING_RE = re.compile(
+    r'^' + re.escape(_MANUAL_COOLING_PREFIX) + r'（到期 ([^）]+)）：'
+)
+
+
+def _manual_cooling_reason(until: str, reason: str) -> str:
+    return f'{_MANUAL_COOLING_PREFIX}（到期 {until}）：{reason}'
+
+
+def _is_manual_cooling_reason(value: object) -> bool:
+    return bool(_MANUAL_COOLING_RE.match(str(value or '')))
+
+
+def _cooling_until(value: object) -> datetime.datetime | None:
+    """解析 state.json 的 until；无法解析返回 None（不猜、不清）。"""
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
 def clear_account_cooling_state(uid: str) -> dict:
     """清除一个账号在 state.json 中的冷却、熔断、降权与模型级限流。
 
@@ -789,6 +828,12 @@ def clear_account_cooling_state(uid: str) -> dict:
     account['consecutive_fails'] = 0
     if not bool(account.get('disabled')):
         account.pop('reason', None)
+    # 只解除本模块写入的强制冷却标记；用户手动摘流量时的 reason 即使碰巧
+    # 含“冷却”也不该被一次“清除冷却”动作顺手解掉。
+    if account.get('manual_disabled') and _is_manual_cooling_reason(
+            account.get('manual_reason')):
+        account['manual_disabled'] = False
+        account.pop('manual_reason', None)
 
     backup = path.with_name(path.name + '.force-clear.bak')
     shutil.copy2(path, backup)
@@ -849,6 +894,15 @@ def set_account_cooling_state(
     account['cool_kind'] = 0  # 0 = CoolHard (hard_credit)，保证全冷却兜底时也不会被选中
     account['reason'] = str(reason or '手动设置冷却').strip()
     account['soft_streak'] = 0
+    # 防护：上游 stock workbuddy2api 的定期签到（ReenableIfCredits）在查得余额大于 0 时
+    # 会调用 reviveCoolingLocked() 重置 until。为防止账号在签到后被自动解冻并消耗积分，
+    # 同步置位 manual_disabled（上游对其承诺：签到解冻绝不解除手动停用，选号完全排除，任务照常）。
+    account['manual_disabled'] = True
+    # 前缀 + 到期时间：既让 clear/force_clear 能识别这是冷却留下的状态位，
+    # 也让到期清理不必依赖 until 之外的隐含约定。永久冷却的 until 是 2099，
+    # 清理任务不会碰它。
+    account['manual_reason'] = _manual_cooling_reason(
+        str(account['until']), account['reason'])
 
     _atomic_write_json(path, state)
     return {
@@ -932,7 +986,11 @@ async def force_clear_account_cooling(uid: str) -> tuple[bool, str, dict]:
         )
         if account is None:
             return False, '该账号不在上游账号池里', {}
-        if not account.get('cooling') and not account.get('rate_limited_models'):
+        has_freeze = bool(
+            account.get('manual_disabled')
+            and _is_manual_cooling_reason(account.get('manual_reason'))
+        )
+        if not account.get('cooling') and not account.get('rate_limited_models') and not has_freeze:
             return True, '该账号当前没有冷却或模型级限流状态，无需清除', {}
 
     stopped, stop_message = await _set_upstream_running(False)
@@ -959,7 +1017,11 @@ async def force_clear_account_cooling(uid: str) -> tuple[bool, str, dict]:
     )
     if account is None:
         return False, '状态已清除且上游已启动，但账号尚未进入账号池', changed
-    if account.get('cooling') or account.get('rate_limited_models'):
+    has_freeze_after = bool(
+        account.get('manual_disabled')
+        and _is_manual_cooling_reason(account.get('manual_reason'))
+    )
+    if account.get('cooling') or account.get('rate_limited_models') or has_freeze_after:
         return False, '上游已重启，但冷却或模型限流状态仍然存在', changed
 
     return True, '已强制清除冷却与模型限流状态，上游已重启生效', changed
@@ -999,10 +1061,78 @@ async def force_set_account_cooling(
     )
     if account is None:
         return False, '状态已设定且上游已启动，但账号尚未进入账号池', changed
-    if not account.get('cooling'):
+    if not account.get('cooling') and not account.get('manual_disabled'):
         return False, '上游已重启，但冷却状态未生效（可能已过截止时间）', changed
 
     return True, '已强制设定冷却状态，上游已重启生效', changed
+
+
+def expired_manual_cooling_uids(
+    now: datetime.datetime | None = None,
+) -> list[str]:
+    """列出「强制冷却已到期」的 uid。
+
+    只认 `manual_reason` 里带 `_MANUAL_COOLING_PREFIX` 标记、且**标记中的
+    到期时间**已过的条目；用户自己摘流量的 manual_disabled（reason 是别的
+    文案）不在范围内。到期时间必须取自 reason，不能取 `until` —— 上游签到
+    会把 until 重置成零值，拿它判断会在签到后立刻清掉冷却。
+    读不到/解析不了 state.json 时返回空列表，让调用方下一轮再试。
+    """
+    try:
+        path = upstream_state_file()
+        state = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:  # noqa: BLE001
+        return []
+    accounts = state.get('accounts') if isinstance(state, dict) else None
+    if not isinstance(accounts, dict):
+        return []
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=datetime.timezone.utc)
+    expired: list[str] = []
+    for uid, account in accounts.items():
+        if not isinstance(account, dict) or not account.get('manual_disabled'):
+            continue
+        reason = str(account.get('manual_reason') or '')
+        match = _MANUAL_COOLING_RE.match(reason)
+        if not match:
+            continue
+        until = _cooling_until(match.group(1))
+        if until is not None and until <= current:
+            expired.append(str(uid))
+    return sorted(expired)
+
+
+async def clear_expired_manual_cooling() -> int:
+    """恢复已到期的强制冷却账号，返回实际清除的数量。
+
+    上游签到只会重置 until，不会清 manual_disabled；不主动清理的话，定时冷却
+    到期后会一直停在「已停用」，与界面上「到期后自动恢复」的承诺不符。
+    只在真的有过期条目时才停上游（写 state.json 必须离线，否则周期 Flush
+    会覆盖），清完立刻启动。
+    """
+    uids = expired_manual_cooling_uids()
+    if not uids:
+        return 0
+    stopped, stop_message = await _set_upstream_running(False)
+    if not stopped:
+        logger.warning('强制冷却到期清理：停止上游失败（%s），下轮重试', stop_message)
+        return 0
+    cleared = 0
+    try:
+        for uid in uids:
+            try:
+                clear_account_cooling_state(uid)
+                cleared += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning('强制冷却到期清理失败 uid=%s: %s', uid, exc)
+    finally:
+        started, start_message = await _set_upstream_running(True)
+        if not started:
+            logger.warning('强制冷却到期清理后启动上游失败：%s', start_message)
+    if cleared:
+        logger.info('已恢复 %d 个到期的强制冷却账号', cleared)
+    return cleared
 
 
 def admin_enabled_in_config() -> tuple[bool | None, str]:
