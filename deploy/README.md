@@ -57,6 +57,46 @@ cd /opt/workbuddy2api && docker compose up -d --build
 
 这三样务必保留：`config.json`（含 `api_key`）、`auths/`（账号授权）、`data/`。
 
+### 直接用预构建的上游镜像（不想本地构建时）
+
+每次发版也会把**上游**构建成镜像推到 GHCR。它和管理端镜像**同源**：都用发布包里
+那份源码（= `upstream-src` 资产 + 我们的全部补丁），所以不会出现「第三方上游镜像
+与项目上游源码不一致」的版本漂移。
+
+```bash
+docker pull ghcr.io/ithtelab/workbuddy2api:<版本>
+# latest 指向最近一次发布；长期跑建议钉版本号（理由同管理端镜像）
+```
+
+要跑多个上游（分组 / 多号池）时，把各自目录里 compose 的 `build: .` 换成 `image:`
+即可，端口与卷不变：
+
+```yaml
+services:
+  wb2api:
+    image: ghcr.io/ithtelab/workbuddy2api:2.8.0
+    container_name: workbuddy2api
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "127.0.0.1:7863:7863"
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+```
+
+三点要知道：
+
+- 镜像里**不带**真实配置（只有 `config.example.json`），`config.json` 必须自己挂；
+  首次使用可从发布包的 `upstream/config.example.json` 复制一份再改。
+- 镜像是**多架构**（amd64 / arm64），与管理端镜像一致。
+- 用镜像之后，上游就**不再由面板的一键更新维护**（那条路同步源码并
+  `docker compose up -d --build`）：升级上游 = 改 `image:` 的版本号 +
+  `docker compose up -d`。面板「全部更新」里针对上游源码的那一步对镜像部署无效，
+  这是预期行为。
+
 ### 许可
 
 上游为 MIT 许可（版权归原作者）。继续使用、修改、再分发都需保留它的 `LICENSE`
@@ -503,7 +543,8 @@ chown -R 10001:10001 /opt/workbuddy2api/auths /opt/workbuddy2api/data
 
 **Q：首次构建上游很慢**
 上游是 Go 项目，首次 `docker compose up --build` 需拉取基础镜像并编译，
-视网络情况可能需要几分钟，属正常现象。
+视网络情况可能需要几分钟，属正常现象。不想本地编译就把 compose 的 `build: .`
+换成预构建镜像（见「〇、上游源码从哪来 → 直接用预构建的上游镜像」）。
 
 **Q：构建管理端镜像失败 / 启动后打开页面显示 ERR_CONNECTION_REFUSED**
 
@@ -598,6 +639,12 @@ grep api_key /opt/workbuddy2api/config.json
 >   这个地址并非回环，绑回环后**可能连不上上游**。实测 Docker Desktop
 >   （Windows / macOS）会把 `host.docker.internal` 转发到宿主回环、连得上；
 >   而 Linux 上容器访问宿主回环通常**不通**。
+>
+> 一键更新会自动处理这个差异：检测到 `WB2API_BASE` 用的是
+> `host.docker.internal` 时，把上游端口绑到宿主网桥地址（如 `172.17.0.1`），
+> 容器可达且不对公网开放；Docker Desktop 仍用 `127.0.0.1`。要指定别的地址
+> （例如只绑内网网卡），在管理端环境变量里设 `WB_UPSTREAM_BIND=192.168.1.10`
+> 后重新执行一次更新。
 >
 > 更可靠的做法有两条，按你的部署形态选：
 >

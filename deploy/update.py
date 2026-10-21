@@ -14,7 +14,8 @@
 2. **状态外置**：进度写入 JSON 文件，管理端读取该文件展示实时日志。
    （更新会重启管理端，若用 HTTP 流式返回会被中断）
 3. **幂等与安全**：上游更新会保留账号文件与配置；并**强制把端口绑定收敛为
-   127.0.0.1**，避免 upstream 仓库里的 `7863:7863` 覆盖我们的安全加固。
+   仅本机/容器网桥**，避免 upstream 仓库里的 `7863:7863` 覆盖我们的安全加固。
+   容器经 `host.docker.internal` 连上游时绑宿主网桥地址（issue #243）。
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ import re
 import shutil
 import signal
 import site
+import socket
 import stat
 import subprocess
 import sys
@@ -58,7 +60,15 @@ _force_utf8_stdio()
 
 
 # ── 运行环境（与 server/config.py 保持一致的默认值）──────────
-INSTALL_DIR = Path(os.environ.get('WB_INSTALL_DIR') or Path(__file__).resolve().parent.parent)
+def _default_install_dir() -> Path:
+    """本脚本可能位于 `deploy/` 或 `server/deploy/`（随 server 替换的那份）。"""
+    here = Path(__file__).resolve()
+    if here.parent.name == 'deploy' and here.parent.parent.name == 'server':
+        return here.parent.parent.parent
+    return here.parent.parent
+
+
+INSTALL_DIR = Path(os.environ.get('WB_INSTALL_DIR') or _default_install_dir())
 UPSTREAM_DIR = Path(os.environ.get('WB_UPSTREAM_DIR') or '/opt/workbuddy2api')
 UPSTREAM_PORT = int(os.environ.get('WB_UPSTREAM_PORT') or 7863)
 MANAGER_PORT = int(os.environ.get('WB_MANAGER_PORT') or 7864)
@@ -568,20 +578,63 @@ def _compose_wide_bind() -> str:
     return f'"{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
 
 
-def _compose_bound_bind() -> str:
-    return f'"127.0.0.1:{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
+def _upstream_bind_host() -> str:
+    """宿主机上发布上游端口时使用的地址（issue #243）。
+
+    默认 `127.0.0.1`（仅本机）。但管理端跑在容器里、通过
+    `WB2API_BASE=http://host.docker.internal:7863` 连上游时，宿主机回环对
+    容器**不可达**（Linux 上尤其明确）；把端口收敛到 127.0.0.1 会让更新后
+    面板一直提示「上游不可用」。
+
+    这种部署下改为绑定 `host.docker.internal` 解析出的宿主机网桥地址
+    （如 172.17.0.1 / 172.18.0.1）：容器可达，且不是公网地址。
+    Docker Desktop 的 192.168.65.0/24 是虚拟机内部地址，宿主并不拥有，
+    仍用 127.0.0.1（Desktop 会把它转发给宿主回环）。
+
+    `WB_UPSTREAM_BIND` 可显式覆盖（如只绑内网网卡 `192.168.1.10`）。
+    """
+    explicit = (os.environ.get('WB_UPSTREAM_BIND') or '').strip()
+    if explicit:
+        return explicit
+    base = (os.environ.get('WB2API_BASE') or '').strip()
+    if not base:
+        return '127.0.0.1'
+    try:
+        parts = urllib.parse.urlsplit(base if '//' in base else f'http://{base}')
+        host = (parts.hostname or '').lower()
+    except ValueError:
+        return '127.0.0.1'
+    if host != 'host.docker.internal':
+        return '127.0.0.1'
+    try:
+        ip = socket.gethostbyname(host)
+    except OSError:
+        return '127.0.0.1'
+    if not ip or ip.startswith('127.') or ip.startswith('192.168.65.'):
+        return '127.0.0.1'
+    return ip
+
+
+def _compose_bound_bind(host: str | None = None) -> str:
+    return f'"{host or _upstream_bind_host()}:{UPSTREAM_PORT}:{UPSTREAM_PORT}"'
 
 
 def _port_converged(text: str) -> str:
-    """把 compose 文本里的公网端口绑定收敛为仅本机（纯文本替换，不落盘）。"""
-    return text.replace(_compose_wide_bind(), _compose_bound_bind())
+    """把 compose 文本里的公网端口绑定收敛为仅本机/容器网桥（纯文本替换）。"""
+    new = _compose_bound_bind()
+    for old in (_compose_wide_bind(),
+                f'"0.0.0.0:{UPSTREAM_PORT}:{UPSTREAM_PORT}"',
+                f'"127.0.0.1:{UPSTREAM_PORT}:{UPSTREAM_PORT}"'):
+        text = text.replace(old, new)
+    return text
 
 
 def enforce_local_bind(rep: Reporter) -> None:
-    """把 compose 的端口绑定收敛为仅本机。
+    """把 compose 的端口绑定收敛到安全地址。
 
-    upstream 仓库里是 `7863:7863`（公网可达）；我们的安全基线要求
-    `127.0.0.1:7863:7863`。每次更新后都要重新施加，否则会悄悄回退。
+    upstream 仓库里是 `7863:7863`（公网可达）；我们的基线要求只绑本机。
+    容器经 host.docker.internal 访问时，绑宿主网桥地址（issue #243），
+    否则容器连不上；每次更新后都要重新施加，否则会悄悄回退。
     """
     compose = UPSTREAM_DIR / 'docker-compose.yml'
     if not compose.is_file():
@@ -590,9 +643,11 @@ def enforce_local_bind(rep: Reporter) -> None:
     text = compose.read_text(encoding='utf-8')
     bound = _compose_bound_bind()
     if bound in text:
-        rep.log('端口绑定已是仅本机（127.0.0.1）')
+        rep.log(f'端口绑定已是 {_upstream_bind_host()}（安全基线）')
         return
-    if _compose_wide_bind() in text:
+    if any(old in text for old in (_compose_wide_bind(),
+                                   f'"0.0.0.0:{UPSTREAM_PORT}:{UPSTREAM_PORT}"',
+                                   f'"127.0.0.1:{UPSTREAM_PORT}:{UPSTREAM_PORT}"')):
         compose.write_text(_port_converged(text), encoding='utf-8')
         rep.log(f'已将端口绑定收敛为 {bound}（安全基线）')
     else:
@@ -698,6 +753,26 @@ def _sync_bundled_upstream(src: Path, rep: Reporter) -> int:
 
     if keep_compose is not None:
         local_compose.write_text(keep_compose, encoding='utf-8')
+    # 标记文件是面板判断「本机上游是否已同步」的唯一依据。它没写进去时，
+    # 上面所有文件都可能已经同步成功，但界面仍会一直提示不一致（issue #240
+    # 的现场就是这类：目录不是持久化挂载，或写权限不足）。这里把它单独验一遍。
+    src_id = src / '.upstream-id'
+    if src_id.is_file():
+        try:
+            want = src_id.read_text(encoding='utf-8').strip()
+            got = (UPSTREAM_DIR / '.upstream-id').read_text(encoding='utf-8').strip() \
+                if (UPSTREAM_DIR / '.upstream-id').is_file() else ''
+            if want and got != want:
+                rep.log(
+                    f'上游标识未能更新：{UPSTREAM_DIR}/.upstream-id '
+                    f'仍是 {got[:8] or "缺失"}，应为 {want[:8]}。'
+                    '请确认该目录已从宿主机挂载且容器用户可写；'
+                    '否则面板会一直提示「随包上游与本机不一致」。',
+                    'error')
+            else:
+                rep.log(f'上游标识已同步：{want[:8]}')
+        except OSError as exc:
+            rep.log(f'核对上游标识失败：{exc}', 'warn')
     if changed or added:
         rep.log(f'上游源码已随包更新：改写 {changed} 个、新增 {added} 个文件')
     else:

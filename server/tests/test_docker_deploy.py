@@ -373,6 +373,51 @@ class ComposeLocalCustomizationTest(unittest.TestCase):
         self.assertIn('1panel-network', out, '用户的网络配置被改了')
         self.assertIn('external: true', out, '用户的 external 声明被改了')
 
+    def test_container_gateway_bind_for_host_docker_internal(self) -> None:
+        """issue #243：容器经 host.docker.internal 连上游时不能绑宿主回环。
+
+        Linux 上容器访问不到宿主的 127.0.0.1；收敛到回环会让更新后上游
+        永远「不可用」。应绑定宿主网桥地址（容器可达、非公网）。
+        """
+        sample = 'services:\n  wb2api:\n    ports:\n      - "7863:7863"\n'
+        env = {'WB2API_BASE': 'http://host.docker.internal:7863',
+               'WB_UPSTREAM_BIND': ''}
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(self.mod.socket, 'gethostbyname',
+                                  return_value='172.17.0.1'):
+            out = self.mod._port_converged(sample)
+        self.assertIn('"172.17.0.1:7863:7863"', out,
+                      '容器部署应绑宿主网桥地址，否则容器连不上上游')
+
+    def test_docker_desktop_gateway_stays_loopback(self) -> None:
+        """Docker Desktop 的 192.168.65.0/24 是虚拟机内部地址，宿主不拥有。"""
+        sample = 'services:\n  wb2api:\n    ports:\n      - "7863:7863"\n'
+        env = {'WB2API_BASE': 'http://host.docker.internal:7863',
+               'WB_UPSTREAM_BIND': ''}
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(self.mod.socket, 'gethostbyname',
+                                  return_value='192.168.65.254'):
+            out = self.mod._port_converged(sample)
+        self.assertIn('"127.0.0.1:7863:7863"', out,
+                      'Desktop 会转发宿主回环，不应绑虚拟机内部地址')
+
+    def test_service_name_keeps_loopback(self) -> None:
+        """同网络用服务名直连时，端口只留给宿主调试，回环即可。"""
+        sample = 'services:\n  wb2api:\n    ports:\n      - "7863:7863"\n'
+        env = {'WB2API_BASE': 'http://workbuddy2api:7863',
+               'WB_UPSTREAM_BIND': ''}
+        with mock.patch.dict(os.environ, env, clear=False):
+            out = self.mod._port_converged(sample)
+        self.assertIn('"127.0.0.1:7863:7863"', out)
+
+    def test_explicit_bind_override(self) -> None:
+        sample = 'services:\n  wb2api:\n    ports:\n      - "7863:7863"\n'
+        with mock.patch.dict(os.environ, {'WB_UPSTREAM_BIND': '192.168.1.10'},
+                             clear=False):
+            out = self.mod._port_converged(sample)
+        self.assertIn('"192.168.1.10:7863:7863"', out,
+                      'WB_UPSTREAM_BIND 应能覆盖自动判定')
+
     def test_bundled_sync_preserves_custom_compose(self) -> None:
         """随包同步只更新源码，用户对 compose 的网络/卷定制要原样保留。"""
         m = self.mod
@@ -892,6 +937,62 @@ class MultiArchImageTest(unittest.TestCase):
         self.assertEqual(mapping.get('aarch64'), 'aarch64', f'解析到的映射：{mapping}')
         # 未识别的架构必须构建期失败，而不是产出坏镜像
         self.assertIn('exit 1', df, '不支持的架构应直接失败')
+
+
+class UpstreamImagePublishTest(unittest.TestCase):
+    """上游也要发预构建镜像（issue #241）。
+
+    用户要跑多个上游容器做分组时，此前只能自己 build：先拉 golang 基础镜像、
+    再编译 6 个二进制；国内网络常常卡在拉基础镜像那一步。于是有人拿第三方镜像
+    顶上，面板随即提示「与项目上游源码不一致」—— 版本漂移的根源不是用户乱来，
+    而是官方没给可拉的东西。
+
+    这里锁住三条：镜像必须**用发布包里那份源码**构建（= 资产 + 全部补丁，
+    与面板随包上游同源，否则又制造一次漂移）、必须多架构、取不到上游源码时
+    不能把发版带红。
+    """
+
+    def setUp(self) -> None:
+        self.wf = (_ROOT / '.github' / 'workflows' / 'release.yml').read_text(encoding='utf-8')
+
+    def _step(self, name: str) -> str:
+        start = self.wf.find('- name: ' + name)
+        self.assertGreater(start, 0, f'找不到步骤：{name}')
+        end = self.wf.find('- name:', start + 10)
+        return self.wf[start:end if end > 0 else len(self.wf)]
+
+    def test_builds_from_the_bundled_upstream(self) -> None:
+        block = self._step('构建并推送上游镜像')
+        self.assertIn('${{ steps.pack.outputs.stage }}/upstream', block,
+                      '上游镜像必须用发布包里那份源码构建，否则会与面板随包上游漂移')
+        self.assertIn('workbuddy2api', self.wf, '镜像名里没有上游项目名')
+
+    def test_upstream_image_is_multi_arch(self) -> None:
+        block = self._step('构建并推送上游镜像')
+        self.assertIn('linux/amd64', block)
+        self.assertIn('linux/arm64', block,
+                      '上游镜像也要 arm64 —— 否则 ARM 主机仍然只能自己 build')
+
+    def test_missing_upstream_does_not_break_release(self) -> None:
+        block = self._step('构建并推送上游镜像')
+        self.assertIn("steps.pack.outputs.has_upstream == '1'", block,
+                      '取不到上游源码时应跳过，不能让发版失败')
+        self.assertIn('continue-on-error: true', block,
+                      '镜像推不上去不该让发布作业标红')
+
+
+class UpdaterBootstrapPackagingTest(unittest.TestCase):
+    """发布包必须把更新器放一份到 server/（issue #240）。
+
+    旧安装的根目录 `deploy/update.py` 可能不支持随包同步；它不会替换自己，
+    只靠根目录那份会让「随包上游与本机不一致」永远消不掉。server/ 每次更新
+    都会被整体替换，因此包内 `server/deploy/update.py` 是更新器的自举入口。
+    """
+
+    def test_release_stage_copies_updater_into_server(self) -> None:
+        wf = (_ROOT / '.github' / 'workflows' / 'release.yml').read_text(encoding='utf-8')
+        self.assertIn('cp deploy/update.py "$STAGE/server/deploy/update.py"', wf,
+                      '发布包没有把更新器放进 server/，旧部署的更新器永远换不掉')
 
 
 # 模板**随仓库分发**（PR #58）：用户 fork 之后把它复制进自己 fork 的
