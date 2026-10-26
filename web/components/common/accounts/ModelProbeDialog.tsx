@@ -1,7 +1,7 @@
 'use client';
 
 import {useMemo, useState} from 'react';
-import {Loader2, ScanSearch, TriangleAlert} from 'lucide-react';
+import {Check, Loader2, Minus, ScanSearch, TriangleAlert} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import {
   Dialog,
@@ -37,12 +37,12 @@ const STATUS_KEY: Record<ProbeStatus, string> = {
 };
 
 const STATUS_STYLE: Record<ProbeStatus, string> = {
-  ok: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
-  rate: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-  credit: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
-  auth: 'bg-red-500/10 text-red-600 dark:text-red-400',
-  no_model: 'bg-muted text-muted-foreground',
-  error: 'bg-red-500/10 text-red-600 dark:text-red-400',
+  ok: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25',
+  rate: 'bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/25',
+  credit: 'bg-orange-500/12 text-orange-700 dark:text-orange-300 border border-orange-500/25',
+  auth: 'bg-red-500/12 text-red-700 dark:text-red-300 border border-red-500/25',
+  no_model: 'bg-muted text-muted-foreground border border-border',
+  error: 'bg-red-500/12 text-red-700 dark:text-red-300 border border-red-500/25',
 };
 
 const STATUS_ORDER: ProbeStatus[] = ['ok', 'rate', 'credit', 'auth', 'no_model', 'error'];
@@ -121,10 +121,12 @@ export function ModelProbeDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
-      <DialogContent className="max-h-[88vh] max-w-[760px] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ScanSearch className="size-4" />
+      <DialogContent className="max-w-[820px]">
+        <DialogHeader className="border-b border-border/50">
+          <DialogTitle className="flex items-center gap-2.5">
+            <span className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <ScanSearch className="size-4" />
+            </span>
             {t('accounts.probeTitle')}
           </DialogTitle>
           <DialogDescription className="pt-1 text-[12px] leading-relaxed">
@@ -132,149 +134,197 @@ export function ModelProbeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          {/* 账号 */}
-          <div>
-            <div className="mb-1 flex items-center justify-between text-xs font-medium">
-              <span>{t('accounts.probeAccounts')}</span>
-              <button
-                type="button"
-                className="text-[11px] text-primary hover:underline"
-                onClick={() => setPickedAccounts(
-                  pickedAccounts.length ? [] : accounts.slice(0, MAX_ACCOUNTS).map((a) => a.file),
-                )}
-              >
-                {pickedAccounts.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
-              </button>
-            </div>
-            <div className="max-h-[150px] overflow-y-auto rounded-xl border p-2">
-              {accounts.length === 0 && (
-                <div className="p-2 text-[11px] text-muted-foreground">
-                  {t('dashboard.noAccounts')}
+        <div className="max-h-[min(560px,calc(100dvh-14rem))] overflow-y-auto">
+          <div className="space-y-4 px-6 py-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              {/* 账号 */}
+              <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground/90">
+                    {t('accounts.probeAccounts')}
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">
+                      {pickedAccounts.length}/{accounts.length}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
+                    onClick={() => setPickedAccounts(
+                      pickedAccounts.length ? [] : accounts.slice(0, MAX_ACCOUNTS).map((a) => a.file),
+                    )}
+                  >
+                    {pickedAccounts.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
+                  </button>
                 </div>
-              )}
-              {accounts.map((a) => (
-                <label key={a.file}
-                       className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-muted">
-                  <input
-                    type="checkbox"
-                    checked={pickedAccounts.includes(a.file)}
-                    onChange={() => setPickedAccounts((v) => toggle(v, a.file, MAX_ACCOUNTS))}
-                  />
-                  <span className="truncate">{a.nickname || a.uid || a.file}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          {/* 模型 */}
-          <div>
-            <div className="mb-1 flex items-center justify-between text-xs font-medium">
-              <span>{t('accounts.probeModels')}</span>
-              <button
-                type="button"
-                className="text-[11px] text-primary hover:underline"
-                onClick={() => setPickedModels(
-                  pickedModels.length ? [] : models.slice(0, MAX_MODELS).map((m) => m.id),
-                )}
-              >
-                {pickedModels.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
-              </button>
-            </div>
-            <div className="max-h-[150px] overflow-y-auto rounded-xl border p-2">
-              {models.length === 0 && (
-                <div className="p-2 text-[11px] text-muted-foreground">
-                  {t('accounts.probeNoModels')}
+                <div className="max-h-[180px] overflow-y-auto rounded-lg border border-border/50 bg-background">
+                  {accounts.length === 0 && (
+                    <div className="p-3 text-center text-[11px] text-muted-foreground">
+                      {t('dashboard.noAccounts')}
+                    </div>
+                  )}
+                  {accounts.map((a) => {
+                    const checked = pickedAccounts.includes(a.file);
+                    return (
+                      <label key={a.file}
+                             className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
+                        <span className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                          checked
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-muted-foreground/40 bg-background'
+                        }`}>
+                          {checked && <Check className="size-3" strokeWidth={3} />}
+                        </span>
+                        <input
+                          type="checkbox"
+                          className="sr-only"
+                          checked={checked}
+                          onChange={() => setPickedAccounts((v) => toggle(v, a.file, MAX_ACCOUNTS))}
+                        />
+                        <span className={`truncate ${checked ? 'font-medium text-foreground' : 'text-foreground/80'}`}>
+                          {a.nickname || a.uid || a.file}
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
-              )}
-              {models.map((m) => (
-                <label key={m.id}
-                       className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-muted">
-                  <input
-                    type="checkbox"
-                    checked={pickedModels.includes(m.id)}
-                    onChange={() => setPickedModels((v) => toggle(v, m.id, MAX_MODELS))}
-                  />
-                  <span className="truncate" title={m.id}>{m.name || m.id}</span>
-                </label>
-              ))}
+              </div>
+
+              {/* 模型 */}
+              <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground/90">
+                    {t('accounts.probeModels')}
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">
+                      {pickedModels.length}/{models.length}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
+                    onClick={() => setPickedModels(
+                      pickedModels.length ? [] : models.slice(0, MAX_MODELS).map((m) => m.id),
+                    )}
+                  >
+                    {pickedModels.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
+                  </button>
+                </div>
+                <div className="max-h-[180px] overflow-y-auto rounded-lg border border-border/50 bg-background">
+                  {models.length === 0 && (
+                    <div className="p-3 text-center text-[11px] text-muted-foreground">
+                      {t('accounts.probeNoModels')}
+                    </div>
+                  )}
+                  {models.map((m) => {
+                    const checked = pickedModels.includes(m.id);
+                    return (
+                      <label key={m.id}
+                             className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
+                        <span className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                          checked
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-muted-foreground/40 bg-background'
+                        }`}>
+                          {checked && <Check className="size-3" strokeWidth={3} />}
+                        </span>
+                        <input
+                          type="checkbox"
+                          className="sr-only"
+                          checked={checked}
+                          onChange={() => setPickedModels((v) => toggle(v, m.id, MAX_MODELS))}
+                        />
+                        <span className={`truncate ${checked ? 'font-medium text-foreground' : 'text-foreground/80'}`}
+                              title={m.id}>
+                          {m.name || m.id}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          <span>{t('accounts.probeRequests', {n: combos})}</span>
-          {combos > MAX_COMBOS && (
-            <span className="text-amber-600">
-              {t('accounts.probeTooMany', {n: combos})}
-            </span>
-          )}
-        </div>
-
-        {error && (
-          <div className="flex items-start gap-2 rounded-xl bg-red-500/10 px-3 py-2 text-[11px] text-red-600">
-            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        {result && (
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-1.5">
-              {STATUS_ORDER.filter((s) => (result.summary[s] ?? 0) > 0).map((s) => (
-                <span key={s}
-                      className={`rounded-full px-2 py-0.5 text-[10px] ${STATUS_STYLE[s]}`}>
-                  {t(STATUS_KEY[s])} {result.summary[s]}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[11px]">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 font-medium text-foreground/80">
+                {t('accounts.probeRequests', {n: combos})}
+              </span>
+              {combos > MAX_COMBOS && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-1 font-medium text-amber-700 dark:text-amber-300">
+                  <TriangleAlert className="size-3" />
+                  {t('accounts.probeTooMany', {n: combos})}
                 </span>
-              ))}
+              )}
             </div>
-            <div className="overflow-x-auto rounded-xl border">
-              <table className="w-full border-collapse text-[11px]">
-                <thead>
-                  <tr className="border-b bg-muted/50">
-                    <th className="whitespace-nowrap px-2 py-1.5 text-left font-medium">
-                      {t('accounts.probeAccounts')}
-                    </th>
-                    {pickedModels.map((m) => (
-                      <th key={m} className="whitespace-nowrap px-2 py-1.5 text-center font-medium"
-                          title={m}>
-                        {modelName(m)}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {accounts.filter((a) => pickedAccounts.includes(a.file)).map((a) => (
-                    <tr key={a.file} className="border-b last:border-0">
-                      <td className="max-w-[160px] truncate px-2 py-1.5" title={a.file}>
-                        {a.nickname || a.uid || a.file}
-                      </td>
-                      {pickedModels.map((m) => {
-                        const r = matrix.get(`${a.file}\u0000${m}`);
-                        return (
-                          <td key={m} className="px-1.5 py-1 text-center">
-                            {r ? (
-                              <span
-                                className={`inline-block rounded-full px-2 py-0.5 ${STATUS_STYLE[r.status]}`}
-                                title={`${t(STATUS_KEY[r.status])}\n${r.message}`}
-                              >
-                                {t(STATUS_KEY[r.status])}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
 
-        <DialogFooter>
+            {error && (
+              <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/8 px-3 py-2.5 text-[11px] text-red-700 dark:text-red-300">
+                <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            {result && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-1.5">
+                  {STATUS_ORDER.filter((s) => (result.summary[s] ?? 0) > 0).map((s) => (
+                    <span key={s}
+                          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${STATUS_STYLE[s]}`}>
+                      {t(STATUS_KEY[s])}
+                      <span className="font-semibold tabular-nums">{result.summary[s]}</span>
+                    </span>
+                  ))}
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-border/60">
+                  <table className="w-full border-collapse text-[11px]">
+                    <thead>
+                      <tr className="border-b border-border/60 bg-muted/60">
+                        <th className="whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold text-foreground/80">
+                          {t('accounts.probeAccounts')}
+                        </th>
+                        {pickedModels.map((m) => (
+                          <th key={m}
+                              className="whitespace-nowrap px-2 py-2 text-center text-[11px] font-semibold text-foreground/80"
+                              title={m}>
+                            {modelName(m)}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accounts.filter((a) => pickedAccounts.includes(a.file)).map((a) => (
+                        <tr key={a.file}
+                            className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/40">
+                          <td className="max-w-[180px] truncate px-3 py-2 font-medium text-foreground/90"
+                              title={a.file}>
+                            {a.nickname || a.uid || a.file}
+                          </td>
+                          {pickedModels.map((m) => {
+                            const r = matrix.get(`${a.file}\u0000${m}`);
+                            return (
+                              <td key={m} className="px-1.5 py-1.5 text-center">
+                                {r ? (
+                                  <span
+                                    className={`inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 font-medium ${STATUS_STYLE[r.status]}`}
+                                    title={`${t(STATUS_KEY[r.status])}\n${r.message}`}
+                                  >
+                                    {t(STATUS_KEY[r.status])}
+                                  </span>
+                                ) : (
+                                  <Minus className="mx-auto size-3 text-muted-foreground/50" />
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <DialogFooter className="border-t border-border/50">
           <Button variant="ghost" size="sm" className="rounded-full"
                   disabled={busy} onClick={() => onOpenChange(false)}>
             {t('common.cancel')}
