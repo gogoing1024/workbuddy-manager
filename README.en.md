@@ -127,6 +127,16 @@ More screenshots: [full gallery](docs/screenshots.md).
 
 ---
 
+## Official download source
+
+**Download only from this repository's [Releases](https://github.com/ithtelab/workbuddy-manager/releases).** Official packages ship with a sha256 digest and `.sig` signature, and the updater verifies them.
+
+A third-party account has been directing users in issues to `github.com/AEmbers/workbuddy-manager` for so-called `v2.8.4` / `v2.8.5` builds, claiming to have "taken over" this project. That fork is not authorized by this project, and its builds do not carry this project's offline signature, so their origin and integrity cannot be verified through the official chain. **Do not set `WB_SKIP_SIGNATURE=1` or disable digest checks to install a third-party package.**
+
+If you have already signed in to the panel or entered upstream accounts on a third-party build, rotate the panel admin password and upstream account authorizations, then reinstall the official package.
+
+---
+
 ## Quick start
 
 You need a server that can run Docker (1 vCPU / 1 GB is enough). Pick one:
@@ -226,6 +236,8 @@ Threat model and hardening notes: [security notes](docs/security-notes.md) and t
 - [Deployment guide](deploy/README.md) — reverse proxy, HTTPS, Windows, updates
 - [Account proxy routes](docs/account-proxy-routes.md) — per-account egress
 - [API tokens](docs/api-tokens.md) — read-only tokens and scopes
+- [Page watchdog](docs/watchdog.md) — upstream page change detection, LLM triage, email / QQ alerts
+- [QQ notifications & open API](docs/qq-bot.md) — AstrBot integration, UMO, bot control boundaries
 
 ---
 
