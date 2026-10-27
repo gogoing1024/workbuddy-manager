@@ -121,7 +121,11 @@ export function ModelProbeDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
-      <DialogContent className="max-w-[820px]">
+      {/* 结果表格出现/隐藏会让弹窗内容高度大幅变化，3D 翻转动画完成后的
+          perspective 矩阵在高度重排时会让 Chromium 把子元素绘制到容器外
+          （getBoundingClientRect 报负 y），表现为「选最后一个模型后白屏」。
+          disableFlip 关闭 3D 翻转、降级为纯淡入淡出，绕开该合成 bug。 */}
+      <DialogContent className="max-w-[820px]" disableFlip>
         <DialogHeader className="border-b border-border/50">
           <DialogTitle className="flex items-center gap-2.5">
             <span className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -165,8 +169,24 @@ export function ModelProbeDialog({
                   {accounts.map((a) => {
                     const checked = pickedAccounts.includes(a.file);
                     return (
-                      <label key={a.file}
-                             className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
+                      <div key={a.file}
+                           role="checkbox"
+                           aria-checked={checked}
+                           tabIndex={0}
+                           onClick={() => setPickedAccounts((v) => toggle(v, a.file, MAX_ACCOUNTS))}
+                           onKeyDown={(e) => {
+                             if (e.key === ' ' || e.key === 'Enter') {
+                               e.preventDefault();
+                               setPickedAccounts((v) => toggle(v, a.file, MAX_ACCOUNTS));
+                             }
+                             // 阻止 Space 触发页面/容器滚动
+                             if (e.key === ' ') e.stopPropagation();
+                           }}
+                           // 不用 <label><input class="sr-only">：input 获焦点时浏览器
+                           // 会自动 scrollIntoView，在 transform: translate(-50%,-50%)
+                           // 的 dialog 容器里会把整棵子树推到视口外（表现为「点选后
+                           // 弹窗白屏」）。改用 role=checkbox 自己处理点击/键盘。
+                           className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 focus-visible:outline-none focus-visible:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
                         <span className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
                           checked
                             ? 'border-primary bg-primary text-primary-foreground'
@@ -174,16 +194,10 @@ export function ModelProbeDialog({
                         }`}>
                           {checked && <Check className="size-3" strokeWidth={3} />}
                         </span>
-                        <input
-                          type="checkbox"
-                          className="sr-only"
-                          checked={checked}
-                          onChange={() => setPickedAccounts((v) => toggle(v, a.file, MAX_ACCOUNTS))}
-                        />
                         <span className={`truncate ${checked ? 'font-medium text-foreground' : 'text-foreground/80'}`}>
                           {a.nickname || a.uid || a.file}
                         </span>
-                      </label>
+                      </div>
                     );
                   })}
                 </div>
@@ -217,8 +231,20 @@ export function ModelProbeDialog({
                   {models.map((m) => {
                     const checked = pickedModels.includes(m.id);
                     return (
-                      <label key={m.id}
-                             className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
+                      <div key={m.id}
+                           role="checkbox"
+                           aria-checked={checked}
+                           tabIndex={0}
+                           onClick={() => setPickedModels((v) => toggle(v, m.id, MAX_MODELS))}
+                           onKeyDown={(e) => {
+                             if (e.key === ' ' || e.key === 'Enter') {
+                               e.preventDefault();
+                               setPickedModels((v) => toggle(v, m.id, MAX_MODELS));
+                             }
+                             if (e.key === ' ') e.stopPropagation();
+                           }}
+                           // 不用 <label><input class="sr-only">：理由同账号列表上方注释
+                           className={`flex cursor-pointer items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-[12px] transition-colors last:border-0 hover:bg-muted/60 focus-visible:outline-none focus-visible:bg-muted/60 ${checked ? 'bg-primary/5' : ''}`}>
                         <span className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
                           checked
                             ? 'border-primary bg-primary text-primary-foreground'
@@ -226,17 +252,11 @@ export function ModelProbeDialog({
                         }`}>
                           {checked && <Check className="size-3" strokeWidth={3} />}
                         </span>
-                        <input
-                          type="checkbox"
-                          className="sr-only"
-                          checked={checked}
-                          onChange={() => setPickedModels((v) => toggle(v, m.id, MAX_MODELS))}
-                        />
                         <span className={`truncate ${checked ? 'font-medium text-foreground' : 'text-foreground/80'}`}
                               title={m.id}>
                           {m.name || m.id}
                         </span>
-                      </label>
+                      </div>
                     );
                   })}
                 </div>

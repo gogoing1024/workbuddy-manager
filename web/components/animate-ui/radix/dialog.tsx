@@ -101,6 +101,15 @@ type DialogContentProps = React.ComponentProps<typeof DialogPrimitive.Content> &
     from?: FlipDirection;
     transition?: Transition;
     showCloseButton?: boolean;
+    /**
+     * 关闭入场时的 3D 翻转动画（rotateX/rotateY + perspective）。
+     *
+     * 内容高度会在打开后大幅变化的弹窗（如模型探测：结果表格出现/隐藏）建议打开：
+     * motion 动画完成后的 perspective 矩阵（matrix3d 带 -0.002 透视分量）在高度
+     * 重排时会让 Chromium 把子元素绘制到容器外（getBoundingClientRect 报负 y），
+     * 表现为「弹窗白屏」。纯淡入淡出不含 perspective，可绕开该问题。
+     */
+    disableFlip?: boolean;
   };
 
 function DialogContent({
@@ -109,6 +118,7 @@ function DialogContent({
   from = 'top',
   transition = {type: 'spring', stiffness: 200, damping: 30},
   showCloseButton = true,
+  disableFlip = false,
   ...props
 }: DialogContentProps) {
   const {isOpen} = useDialog();
@@ -117,6 +127,33 @@ function DialogContent({
     from === 'top' || from === 'left' ? '20deg' : '-20deg';
   const isVertical = from === 'top' || from === 'bottom';
   const rotateAxis = isVertical ? 'rotateX' : 'rotateY';
+
+  // disableFlip：高度会在打开后大幅变化的弹窗（见 DialogContentProps 注释）关闭
+  // 3D 翻转，动画降级为纯淡入淡出，绕开 Chromium 在 perspective 矩阵 + 高度重排
+  // 下把子元素绘制到容器外的合成 bug。
+  const enterAnim = disableFlip
+    ? {
+        initial: {opacity: 0, scale: 0.98},
+        animate: {opacity: 1, scale: 1},
+        exit: {opacity: 0, scale: 0.98},
+      }
+    : {
+        initial: {
+          opacity: 0,
+          scale: 0.95,
+          transform: `perspective(500px) ${rotateAxis}(${initialRotation})`,
+        },
+        animate: {
+          opacity: 1,
+          scale: 1,
+          transform: `perspective(500px) ${rotateAxis}(0deg)`,
+        },
+        exit: {
+          opacity: 0,
+          scale: 0.95,
+          transform: `perspective(500px) ${rotateAxis}(${initialRotation})`,
+        },
+      };
 
   return (
     <AnimatePresence>
@@ -135,21 +172,9 @@ function DialogContent({
             <motion.div
               key="dialog-content"
               data-slot="dialog-content"
-              initial={{
-                opacity: 0,
-                scale: 0.95,
-                transform: `perspective(500px) ${rotateAxis}(${initialRotation})`,
-              }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-                transform: `perspective(500px) ${rotateAxis}(0deg)`,
-              }}
-              exit={{
-                opacity: 0,
-                scale: 0.95,
-                transform: `perspective(500px) ${rotateAxis}(${initialRotation})`,
-              }}
+              initial={enterAnim.initial}
+              animate={enterAnim.animate}
+              exit={enterAnim.exit}
               transition={{...transition, duration: 0.15, ease: 'easeOut'}}
               className={cn(
                   // 背景使用不透明色：半透明会让背后遮罩透出，与不透明的 header/footer
