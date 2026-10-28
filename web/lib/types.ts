@@ -1028,6 +1028,11 @@ export interface TaskRunStatus {
 export type ProbeStatus = 'ok' | 'rate' | 'credit' | 'auth' | 'no_model' | 'error';
 
 export interface ProbeModelResult {
+  /** 探测成功且已同步网关（解除该模型 11102 误标）；上游没开管理接口时缺省 */
+  gateway_synced?: boolean;
+  /** 上游未注册管理接口（admin.enabled=false）：不是失败，只是无从同步 */
+  gateway_sync_skipped?: boolean;
+  gateway_sync_message?: string;
   file: string;
   uid: string;
   nickname: string;
@@ -1199,6 +1204,61 @@ export interface Versions {
  * GitHub 镜像（issue #216）：国内机器直连 GitHub 超时时，用加速服务取
  * Release 元信息与发布包。走镜像时**不会**发送 GitHub Token。
  */
+/**
+ * 账号列的自诊断（issue #232）。
+ *
+ * 请求日志的「账号」来自上游运行日志回填，面板转发时并不知道用了哪个号。
+ * 这一列空的时候有四种完全不同的原因，后端把事实与判断依据一起返回。
+ */
+export interface AccountBackfillInfo {
+  /** native = 读日志文件；docker = docker logs */
+  mode: 'native' | 'docker';
+  /** native 是文件路径，docker 是容器名 */
+  source: string;
+  /** 最近一次采集的时刻（epoch 秒，0 = 还没跑过） */
+  checked_at: number;
+  /** 那次读到的日志行数 */
+  lines: number;
+  /** 解析出的请求行数 */
+  parsed: number;
+  /** 成功回填到本地请求记录的行数 */
+  filled: number;
+  /** 采集抛出的异常原文（空 = 没有异常） */
+  error: string;
+  /** native: 日志文件是否存在；docker: 能否操作 docker */
+  exists: boolean;
+  /** native 的日志文件大小（字节） */
+  size?: number;
+  /** 人读的判断结论；空串表示当前没有异常 */
+  hint: string;
+}
+
+/** 自动更新设置（设置 → 更新） */
+export interface AutoUpdateConfig {
+  enabled: boolean;
+  /** 检测间隔（小时，1–168） */
+  interval_hours: number;
+  /** 允许动手的时间窗（服务器本地时间整点，[start, end)，相等 = 全天） */
+  window_start: number;
+  window_end: number;
+  /** auto：上游变了且能操作 docker 时一起更新；manager：只更新管理端 */
+  target: 'auto' | 'manager';
+}
+
+export interface AutoUpdateInfo extends AutoUpdateConfig {
+  state: {
+    last_check_at: number;
+    /** none / wait / started / error / 空 = 还没跑过 */
+    last_action: string;
+    last_message: string;
+    pending_version: string;
+  };
+  docker_ok: boolean;
+  /** 非空 = 当前部署形态不支持自动更新（如 Windows 原生），开关禁用 */
+  unsupported_reason: string;
+  server_tz_offset_minutes: number;
+}
+
 export interface GithubMirror {
   /** 生效的镜像基址（规范化后带尾斜杠）；空串 = 直连 */
   mirror: string;

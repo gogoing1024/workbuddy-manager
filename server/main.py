@@ -21,7 +21,8 @@ from .routers import (
     proxies, settings, stats, system, tokens, upstreams, watchdog as watchdog_router,
 )
 from .services import (
-    accountlog, cooling, dailyplan, pgsync, renew, tasklog, taskrun, watchdog,
+    accountlog, autoupdate, cooling, dailyplan, modelrecovery, pgsync, renew, tasklog,
+    taskrun, watchdog,
 )
 
 # 最早时刻把标准输出/错误钉成 UTF-8：Windows 中文区域默认按 cp936 编码，日志里
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
     # 强制冷却到期清理：manual_disabled 不会随 until 自动消失，不清理会让
     # 定时冷却变成永久停用（见 services/cooling.py）。
     cooling.start_scheduler()
+    modelrecovery.start_scheduler()
     # 每日任务计划（签到 / 领奖 / 做任务）：管理端自己的调度器，把「一键」动作
     # 做成每天到点自动跑。默认全部关闭，由用户在账号页显式开启（full 有风控风险）。
     dailyplan.start_scheduler()
@@ -74,6 +76,9 @@ async def lifespan(app: FastAPI):
     # 上游网页改版监控：抓结构指纹 → 变化时 LLM 判读 / 查活动补偿 → 邮件上报。
     # 默认关闭；邮件启用前会先探 SMTP 出口（出口不通就不给开）。
     watchdog.start_scheduler()
+    # 自动更新：按「设置 → 更新」里的开关与时间窗定时检测并执行一键更新。
+    # 默认关闭；真正的更新仍走 updater.start_update（与按钮同一条路）。
+    autoupdate.start_scheduler()
     try:
         yield
     finally:
@@ -81,10 +86,12 @@ async def lifespan(app: FastAPI):
         taskrun.stop_scheduler()
         renew.stop_scheduler()
         cooling.stop_scheduler()
+        modelrecovery.stop_scheduler()
         dailyplan.stop_scheduler()
         accountlog.stop_collector()
         pgsync.stop_scheduler()
         watchdog.stop_scheduler()
+        autoupdate.stop_scheduler()
         # 出站客户端是共享的（issue #144：Windows 上每次新建要 ~1 秒），
         # 退出时统一关掉，别把连接池与 SSL 上下文丢在原地。
         await config.close_clients()
@@ -136,7 +143,7 @@ def _warn_if_exposed() -> None:
 
 app = FastAPI(
     title='WorkBuddy Manager',
-    version='2.11.1',
+    version='2.11.5',
     lifespan=lifespan,
     # 生产环境默认关闭交互式文档与 OpenAPI 描述：
     # 它们会把管理接口全貌（路径、参数、结构）暴露给任何未认证访问者，

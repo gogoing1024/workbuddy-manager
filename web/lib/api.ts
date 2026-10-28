@@ -26,6 +26,9 @@ import type {
   CreditExpiry,
   CreditsMeta,
   DrawResult,
+  AccountBackfillInfo,
+  AutoUpdateConfig,
+  AutoUpdateInfo,
   GithubMirror,
   IpAccessLog,
   IpRule,
@@ -609,6 +612,8 @@ export const tokenApi = {
 export const logApi = {
   list: (params: Record<string, unknown>) => get<Page<RequestLog>>('/api/logs', params),
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
+  /** 账号列的自诊断：日志从哪读、读到几行、为什么可能是空的（issue #232） */
+  accountBackfill: () => get<AccountBackfillInfo>('/api/logs/account-backfill'),
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */
@@ -784,6 +789,10 @@ export const systemApi = {
   githubMirror: () => get<GithubMirror>('/api/settings/github-mirror'),
   saveGithubMirror: (mirror: string) =>
     put<GithubMirror>('/api/settings/github-mirror', {mirror}),
+  /** 自动更新：定时检测，在时间窗内自动执行一键更新 */
+  autoUpdate: () => get<AutoUpdateInfo>('/api/settings/auto-update'),
+  saveAutoUpdate: (cfg: AutoUpdateConfig) =>
+    put<AutoUpdateInfo>('/api/settings/auto-update', cfg),
   /**
    * 启动一键更新；target: manager | upstream | both。
    * source='uploaded' 用面板里已上传的离线升级包（issue #153）。

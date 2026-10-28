@@ -40,7 +40,9 @@ HOST = _env('WB_MANAGER_HOST', '0.0.0.0')
 WB2API_BASE = _env('WB2API_BASE', 'http://127.0.0.1:7863').rstrip('/')
 WB2API_KEY = _env('WB2API_KEY', '')
 WB2API_CONTAINER = _env('WB2API_CONTAINER', 'workbuddy2api')
-WB2API_MODE = _env('WB2API_MODE', 'docker').lower()  # docker | native
+WB2API_MODE = _env('WB2API_MODE', 'docker').lower()  # docker | native | systemd
+# systemd 模式（宿主机直跑上游二进制、由 systemd 托管）下上游的 unit 名
+WB2API_SERVICE = _env('WB2API_SERVICE', 'workbuddy2api')
 
 # 上游数据文件（与 workbuddy2api 共享）
 AUTH_DIR = Path(_env('WB_AUTH_DIR', '/opt/workbuddy2api/auths'))
@@ -54,6 +56,16 @@ WB2API_STOP_SCRIPT = Path(_env(
 ))
 WB2API_LOG_FILE = Path(_env(
     'WB2API_LOG_FILE', str(UPSTREAM_DIR / 'data' / 'server.err.log'),
+))
+# 上游把日志**分流**写两个流：每请求一行的对话记录（含实际使用的账号）是
+# `fmt.Fprintf(os.Stdout, ...)`（上游 internal/server/logging.go），签到 / 活跃 /
+# 旅行等业务编排走 Go log → stderr。原生启动脚本（start-workbuddy2api.cmd）把
+# 两路分别重定向到 server.out.log 与 server.err.log。
+#
+# 所以账号回填必须读**对话日志**这个文件：读 WB2API_LOG_FILE 只会拿到业务日志，
+# 一条 chat 行都解析不到，账号列恒为空（Docker 模式不区分，`docker logs` 合并两路）。
+WB2API_CHAT_LOG_FILE = Path(_env(
+    'WB2API_CHAT_LOG_FILE', str(UPSTREAM_DIR / 'data' / 'server.out.log'),
 ))
 
 # 本管理端数据
