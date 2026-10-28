@@ -1,10 +1,8 @@
 'use client';
 
 import {useEffect, useMemo, useState} from 'react';
-import {ChevronRight, RefreshCw, ShieldAlert, TriangleAlert, Users, Zap, CheckCircle2} from 'lucide-react';
-import {notify} from '@/lib/toast';
+import {CheckCircle2, RefreshCw, TriangleAlert, Users} from 'lucide-react';
 import {useT} from '@/lib/i18n/provider';
-import {accountApi, errText} from '@/lib/api';
 import type {Account} from '@/lib/types';
 import {availabilityLabelKey, availabilityOf} from '@/lib/account-status';
 import {Badge} from '@/components/ui/badge';
@@ -42,7 +40,6 @@ export function ReloginQueueDialog({
 }) {
   const t = useT();
   const [reloginOpen, setReloginOpen] = useState(false);
-  const [busyFile, setBusyFile] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   // 封控 = 上游自动禁用（`disabled`）。「已停用」（面板改名 / 上游手动位）是用户主动摘除，不进封控队列。
@@ -57,24 +54,6 @@ export function ReloginQueueDialog({
       setSelectedIndex(Math.max(0, queue.length - 1));
     }
   }, [queue.length, selectedIndex]);
-
-  const current = queue[selectedIndex] ?? queue[0];
-
-  /** ping 测试 = 连通性测试（与账号行内那个 Zap 按钮同一接口） */
-  async function ping(a: Account) {
-    setBusyFile(a.file);
-    try {
-      const res = await accountApi.test(a.file, upstreamId);
-      (res.ok ? notify.ok : notify.warn)(res.message || t('accounts.testDone'));
-      // ping 通过说明该账号已可用：刷新一次让状态与队列同步（后端可能在后台
-      // 刚完成「登录后自动解除系统禁用」，列表还停在旧快照上）。
-      if (res.ok) onSuccess?.();
-    } catch (e) {
-      notify.err(errText(e));
-    } finally {
-      setBusyFile(null);
-    }
-  }
 
   /**
    * 重登成功后的收尾：立即刷新一次，并补几次延迟刷新。
@@ -157,77 +136,8 @@ export function ReloginQueueDialog({
           ) : (
             <DialogBody className="max-h-[min(560px,calc(100dvh-14rem))]">
               <div className="space-y-4 px-6 py-4">
-              {/* 当前操作目标卡片 */}
-              {current && (
-                <div className="rounded-xl border border-border/60 bg-gradient-to-b from-muted/60 to-muted/20 p-4 space-y-3 shadow-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="grid h-6 w-6 place-items-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground shadow-sm ring-2 ring-primary/20">
-                        {selectedIndex + 1}
-                      </span>
-                      <span className="text-xs font-semibold uppercase tracking-wider text-primary">
-                        {t('accounts.reloginQueueCurrent')}
-                      </span>
-                    </div>
-                    {statusBadge(current)}
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="text-sm font-semibold leading-tight truncate">
-                      {current.nickname || t('accounts.unnamed')}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="inline-flex items-center rounded-md bg-muted/80 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground ring-1 ring-inset ring-border/50">
-                        UID
-                      </span>
-                      <span className="font-mono text-[11px] text-muted-foreground truncate">
-                        {current.uid}
-                      </span>
-                    </div>
-                    {current.disabled_reason ? (
-                      <div
-                        className="flex items-start gap-1.5 text-[11px] text-muted-foreground cursor-help"
-                        title={String(current.disabled_reason)}
-                      >
-                        <ShieldAlert className="mt-0.5 h-3 w-3 shrink-0 text-destructive/80" />
-                        <span className="truncate">
-                          {t('accounts.reloginQueueReason')}
-                          {String(current.disabled_reason)}
-                        </span>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-border/50">
-                    <span className="text-[11px] text-muted-foreground">
-                      {t('accounts.reloginQueueCurrentHint')}
-                    </span>
-                    <div className="flex gap-1.5">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="rounded-full h-7 px-2.5 text-xs gap-1 hover:bg-muted"
-                        disabled={busyFile === current.file}
-                        onClick={() => ping(current)}
-                      >
-                        <Zap className="h-3 w-3" />
-                        {t('accounts.reloginQueuePing')}
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="rounded-full h-7 px-3 text-xs gap-1 shadow-sm"
-                        onClick={() => setReloginOpen(true)}
-                      >
-                        <RefreshCw className="h-3 w-3" />
-                        {t('accounts.reloginQueueReloginCurrent')}
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {/* 队列清单（点击任意行直接跳转并选中该账号） */}
-              <div className="space-y-2 mt-5">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between px-1 text-xs font-medium">
                   <span className="text-muted-foreground">
                     {t('accounts.reloginQueueWaitingCount', {count: queue.length})}
@@ -296,14 +206,6 @@ export function ReloginQueueDialog({
                             <RefreshCw className="h-3 w-3" />
                             <span>{t('accounts.reloginQueueRelogin')}</span>
                           </Button>
-                          <ChevronRight
-                            className={
-                              'h-3.5 w-3.5 transition-all ' +
-                              (isSelected
-                                ? 'text-primary opacity-100'
-                                : 'text-muted-foreground/40 opacity-0 group-hover:opacity-60')
-                            }
-                          />
                         </div>
                       </div>
                     );

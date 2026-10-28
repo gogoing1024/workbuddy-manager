@@ -1538,7 +1538,6 @@ export default function AccountsPage() {
                     >
                       {a.nickname || t('accounts.unnamed')}
                     </div>
-                    <div className="truncate font-mono text-[11px] text-muted-foreground">{a.uid}</div>
                     {a.note ? (
                       <div className="truncate text-[11px] text-muted-foreground" title={a.note}>
                         {t('accounts.noteLabel')}{a.note}
@@ -1582,23 +1581,21 @@ export default function AccountsPage() {
         </div>
 
         {/* 桌面端：表格 */}
-        {/* 桌面端表格：固定列宽（table-fixed）+ UID 单行省略。
-            此前这里是 auto 布局，列宽由内容撑开 —— UID 是 36 字符的 UUID、
-            操作列最多有 10 个图标按钮，两者加起来必然把表格推宽，于是容器
-            （Table 组件自带的 overflow-x-auto）出现横向滚动条，用户每次都要
-            拖动才能看到最右侧的操作按钮（issue #151 的后续反馈）。
-            固定布局把「列宽」从内容手里拿走：内容超宽就在本列内省略 / 换行，
-            表格永远等于容器宽度，不再需要横向拖动。 */}
+        {/* 桌面端表格：固定列宽（table-fixed）。
+            此前这里是 auto 布局，列宽由内容撑开 —— 操作列最多有 10 个图标按钮，
+            会把表格推宽，于是容器（Table 组件自带的 overflow-x-auto）出现横向
+            滚动条，用户每次都要拖动才能看到最右侧的操作按钮（issue #151 的
+            后续反馈）。固定布局把「列宽」从内容手里拿走：内容超宽就在本列内
+            省略 / 换行，表格永远等于容器宽度，不再需要横向拖动。 */}
         <div className="hidden md:block">
         <Table className="table-fixed [&_td]:overflow-hidden">
           <TableHeader>
             <TableRow className="border-b border-border/60 hover:bg-transparent">
-              <TableHead className="w-[17%] pl-4 text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
-              <TableHead className="w-[19%] text-[11px] text-muted-foreground">UID</TableHead>
-              <TableHead className="w-[9%] text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
-              <TableHead className="w-[14%] text-[11px] text-muted-foreground">{t('metric.credits')}</TableHead>
-              <TableHead className="w-[13%] text-[11px] text-muted-foreground">{t('accounts.colExpiry')}</TableHead>
-              {hasProxyUi && <TableHead className="w-[10%] text-[11px] text-muted-foreground">{t('accounts.proxyLine')}</TableHead>}
+              <TableHead className="w-[26%] pl-4 text-[11px] text-muted-foreground">{t('accounts.colNickname')}</TableHead>
+              <TableHead className="w-[18%] text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
+              <TableHead className="w-[12%] text-[11px] text-muted-foreground">{t('metric.credits')}</TableHead>
+              <TableHead className="w-[12%] text-[11px] text-muted-foreground">{t('accounts.colExpiry')}</TableHead>
+              {hasProxyUi && <TableHead className="w-[9%] text-[11px] text-muted-foreground">{t('accounts.proxyLine')}</TableHead>}
               {isAdmin && <TableHead className="w-[330px] whitespace-nowrap pr-4 text-right text-[11px] text-muted-foreground">{t('accounts.colActions')}</TableHead>}
             </TableRow>
           </TableHeader>
@@ -1622,17 +1619,12 @@ export default function AccountsPage() {
                         同一版本，右上角的切换按钮已经说明了这件事（issue #313）。 */}
                   </div>
                 </TableCell>
-                <TableCell className="font-mono text-xs text-muted-foreground">
-                  {/* 固定列宽下 UID（36 字符 UUID）装不满整行，省略号收尾 +
-                      title 保留全文，鼠标悬停可看完整值（复制按钮在详情里）。 */}
-                  <div className="truncate" title={a.uid}>{a.uid}</div>
-                </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap items-center gap-1.5">
                     {renderStatus(a)}
                   </div>
                   {/* 模型限流/缺模的提示放在状态**下面**另起一行：原先它与状态徽章
-                      挤在同一个 flex 行里，长模型名会把这一列撑宽、盖住右侧 UID 列
+                      挤在同一个 flex 行里，长模型名会把这一列撑宽、盖住右侧的列
                       （issue #313）。整行宽度给它，长名字也能读全。 */}
                   {renderModelLimit(a) && (
                     <div className="mt-1 max-w-full">{renderModelLimit(a)}</div>
