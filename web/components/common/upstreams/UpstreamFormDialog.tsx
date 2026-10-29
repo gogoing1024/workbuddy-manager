@@ -167,9 +167,8 @@ export function UpstreamFormDialog({
           <DialogTitle>{editing ? t('upstreams.editTitle') : t('upstreams.addTitle')}</DialogTitle>
           {!simple && <DialogDescription>{t('upstreams.formGroupHint')}</DialogDescription>}
         </DialogHeader>
-        {/* 布局类（space-y-4 / px-6）必须写在 Body **里面**这层：DialogBody 的
-            className 落在 ScrollArea 的 Root 上，写在那儿字段之间会没有间距
-            （见 DialogBody 的注释）。 */}
+        {/* 内容层：DialogBody 是原生滚动容器，这层 div 负责字段间距与内边距，
+            也和其它弹窗的写法保持一致。 */}
         <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
           <div className="space-y-4 px-6 pb-2">
             <div className="space-y-1.5">

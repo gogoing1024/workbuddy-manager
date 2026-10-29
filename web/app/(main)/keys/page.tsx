@@ -1114,11 +1114,10 @@ export default function KeysPage() {
                       但实际无法直接粘贴。高度跟着视口走，别把弹窗顶长。
                       field-sizing-fixed + min-w-0：Textarea 基类带 field-sizing-content
                       （按内容自适应宽度），叠上 wrap="off" 后固有宽度=最长一行；
-                      而 DialogBody(Radix ScrollArea) 的内层是 display:table，按
-                      max-content 取列宽 —— 于是 Codex 那种"TOML 塞进 JSON config
-                      字段"的一整行长字符串会把整块内容撑出弹窗右缘（select 和
-                      按钮被推到画面外）。field-sizing-fixed 让它回到按 CSS 宽度
-                      （w-full）排布，min-w-0 拆掉 flex 项的 min-width:auto 兜底。 */}
+                      min-w-0 拆掉 flex 项默认的 min-width:auto —— 否则 Codex 那种
+                      "TOML 塞进 JSON config 字段"的一整行长字符串会把整块内容撑出
+                      弹窗右缘（select 和按钮被推到画面外）。field-sizing-fixed 让它
+                      回到按 CSS 宽度（w-full）排布。 */}
                   <Textarea readOnly wrap="off" value={exported}
                             className="max-h-[min(240px,28dvh)] min-h-[120px] flex-1 min-w-0 field-sizing-fixed overflow-auto font-mono text-[11px] leading-relaxed" />
                   <CopyButton value={exported} size="sm" showLabel label={t('common.copy')} />

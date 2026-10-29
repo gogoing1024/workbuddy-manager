@@ -11,7 +11,6 @@ import {
 } from 'motion/react';
 
 import {cn} from '@/lib/utils';
-import {ScrollArea} from '@/components/ui/scroll-area';
 
 type DialogContextType = {
   isOpen: boolean;
@@ -236,34 +235,32 @@ function DialogFooter({className, ...props}: DialogFooterProps) {
   );
 }
 
-type DialogBodyProps = React.ComponentProps<typeof ScrollArea>;
+type DialogBodyProps = React.ComponentProps<'div'>;
 
 /**
  * 弹窗主体（可滚动）。
  *
- * ⚠️ `className` 落在 Radix ScrollArea 的 **Root** 上，而 children 被塞进内层的
- * Viewport —— 所以这里**只能写结构性类**（限高 `max-h-[…]` 之类）。布局类
- * （`space-y-*` / `px-*` / `py-*`）必须再套一层 div：
+ * 用**原生滚动容器**，不再用 Radix ScrollArea。ScrollArea 的滑块位置是 JS 算出来的
+ * （hover 才挂载、rAF 轮询 scrollTop、拿 offsetHeight 反推 thumb 尺寸），在
+ * 「打开动画还没结束就滚」「表单内容高度变化」「窗口缩放 / 移动端地址栏伸缩」
+ * 这些时序下会和真实滚动位置脱节 —— 用户反馈过「往下滚，滚动条却跑到了别处」
+ * 的错位（内容在顶部、滑块却在底部）。原生滚动的位置由浏览器维护，不可能不同步。
  *
- *   <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
- *     <div className="space-y-4 px-6 pb-2">…字段…</div>
- *   </DialogBody>
+ * 视觉上交给 globals.css 的 `.scroll-slim`（10px 细滚动条、半透明圆角滑块，
+ * 和原来的 Radix 滚动条基本一致）。
  *
- * 写成 `<DialogBody className="space-y-3 px-6">` 不会报错，但 space-y-3 会作用到
- * Root 的 Viewport / ScrollBar / Corner 三个兄弟节点上，字段之间**一个间距都没有**
- * —— 表现为「所有字段挤成一坨」（上游表单与移动分组弹窗都踩过这个坑）。
- * 横向的 px-* 则"碰巧"有效：Root 的内边距会把 Viewport 挤窄，看起来像是生效了，
- * 更容易骗过肉眼。
+ * `className` 直接落在滚动容器上，`max-h-[…]` 限高和 `space-y-*` / `px-*` 布局类
+ * 都可以直接写；既有调用方仍在里面套一层 div，保持兼容、无需改动。
  */
 function DialogBody({className, children, ...props}: DialogBodyProps) {
   return (
-    <ScrollArea
+    <div
       data-slot="dialog-body"
-      className={cn('min-h-0 flex-1', className)}
+      className={cn('scroll-slim min-h-0 flex-1 overflow-y-auto overscroll-contain', className)}
       {...props}
     >
       {children}
-    </ScrollArea>
+    </div>
   );
 }
 
