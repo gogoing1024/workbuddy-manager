@@ -162,14 +162,16 @@ export function UpstreamFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[440px]" showCloseButton>
-        <DialogHeader>
+      {/* flex 纵向布局：内容超高时由 DialogBody 内部滚动，头部/底栏保持完整，
+          避免小屏上网格行被压缩、底部按钮贴边显得拥挤。 */}
+      <DialogContent className="flex max-w-[440px] flex-col" showCloseButton>
+        <DialogHeader className="shrink-0">
           <DialogTitle>{editing ? t('upstreams.editTitle') : t('upstreams.addTitle')}</DialogTitle>
           {!simple && <DialogDescription>{t('upstreams.formGroupHint')}</DialogDescription>}
         </DialogHeader>
         {/* 内容层：DialogBody 是原生滚动容器，这层 div 负责字段间距与内边距，
             也和其它弹窗的写法保持一致。 */}
-        <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
+        <DialogBody>
           <div className="space-y-4 px-6 pb-2">
             <div className="space-y-1.5">
               <Label className="text-[11px] text-muted-foreground">{t('upstreams.fieldName')}</Label>
@@ -258,11 +260,20 @@ export function UpstreamFormDialog({
             )}
           </div>
         </DialogBody>
-        <DialogFooter>
-          <Button variant="outline" className="rounded-full" onClick={() => onOpenChange(false)}>
+        <DialogFooter className="shrink-0">
+          {/* 小屏：两个按钮等分整行、触控高度加到 40px；≥sm 恢复右对齐的紧凑尺寸。 */}
+          <Button
+            variant="outline"
+            className="h-10 flex-1 rounded-full sm:h-9 sm:flex-none"
+            onClick={() => onOpenChange(false)}
+          >
             {t('common.cancel')}
           </Button>
-          <Button className="rounded-full" disabled={busy} onClick={submit}>
+          <Button
+            className="h-10 flex-1 rounded-full sm:h-9 sm:flex-none"
+            disabled={busy}
+            onClick={submit}
+          >
             {t('common.save')}
           </Button>
         </DialogFooter>
