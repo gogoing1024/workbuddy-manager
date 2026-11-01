@@ -79,6 +79,8 @@ export function ModelProbeDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<ProbeModelsResponse | null>(null);
+  // 结果属于本次探测：锁定当时勾选的账号/模型，之后改勾选不重画旧结果的行列。
+  const [resultSelection, setResultSelection] = useState<{accounts: Account[]; models: string[]}>({accounts: [], models: []});
   const [completed, setCompleted] = useState(0);
   const [stopping, setStopping] = useState(false);
   const stopRequested = useRef(false);
@@ -107,6 +109,10 @@ export function ModelProbeDialog({
     setBusy(true);
     setError('');
     setResult(null);
+    setResultSelection({
+      accounts: accounts.filter((a) => pickedAccounts.includes(a.file)),
+      models: [...pickedModels],
+    });
     setCompleted(0);
     setStopping(false);
     stopRequested.current = false;
@@ -145,6 +151,7 @@ export function ModelProbeDialog({
         .filter((m) => m.reason?.startsWith('11102'))
         .map((m) => m.model),
     ))]);
+    setCompleted(0);
   }
 
   return (
@@ -180,11 +187,12 @@ export function ModelProbeDialog({
                   </span>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || accounts.length === 0}
                     className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
-                    onClick={() => setPickedAccounts(
-                      pickedAccounts.length === accounts.length ? [] : accounts.map((a) => a.file),
-                    )}
+                    onClick={() => {
+                      setPickedAccounts(pickedAccounts.length === accounts.length ? [] : accounts.map((a) => a.file));
+                      setCompleted(0);
+                    }}
                   >
                     {pickedAccounts.length === accounts.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
                   </button>
@@ -203,11 +211,11 @@ export function ModelProbeDialog({
                            aria-checked={checked}
                            aria-disabled={busy}
                            tabIndex={busy ? -1 : 0}
-                           onClick={() => { if (!busy) setPickedAccounts((v) => toggle(v, a.file)); }}
+                           onClick={() => { if (!busy) { setPickedAccounts((v) => toggle(v, a.file)); setCompleted(0); } }}
                            onKeyDown={(e) => {
                              if (e.key === ' ' || e.key === 'Enter') {
                                e.preventDefault();
-                               if (!busy) setPickedAccounts((v) => toggle(v, a.file));
+                               if (!busy) { setPickedAccounts((v) => toggle(v, a.file)); setCompleted(0); }
                              }
                              // 阻止 Space 触发页面/容器滚动
                              if (e.key === ' ') e.stopPropagation();
@@ -244,11 +252,12 @@ export function ModelProbeDialog({
                   </span>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || models.length === 0}
                     className="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
-                    onClick={() => setPickedModels(
-                      pickedModels.length === models.length ? [] : models.map((m) => m.id),
-                    )}
+                    onClick={() => {
+                      setPickedModels(pickedModels.length === models.length ? [] : models.map((m) => m.id));
+                      setCompleted(0);
+                    }}
                   >
                     {pickedModels.length === models.length ? t('accounts.probeClear') : t('accounts.probeSelectAll')}
                   </button>
@@ -267,11 +276,11 @@ export function ModelProbeDialog({
                            aria-checked={checked}
                            aria-disabled={busy}
                            tabIndex={busy ? -1 : 0}
-                           onClick={() => { if (!busy) setPickedModels((v) => toggle(v, m.id)); }}
+                           onClick={() => { if (!busy) { setPickedModels((v) => toggle(v, m.id)); setCompleted(0); } }}
                            onKeyDown={(e) => {
                              if (e.key === ' ' || e.key === 'Enter') {
                                e.preventDefault();
-                               if (!busy) setPickedModels((v) => toggle(v, m.id));
+                               if (!busy) { setPickedModels((v) => toggle(v, m.id)); setCompleted(0); }
                              }
                              if (e.key === ' ') e.stopPropagation();
                            }}
@@ -322,14 +331,14 @@ export function ModelProbeDialog({
             )}
 
             {result && (
-              <div className="space-y-3">
+              <div className="min-w-0 space-y-3">
                 <div className="flex flex-wrap gap-1.5">
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
                     {t('accounts.probeSynced', {n: result.results.filter((r) => r.gateway_synced).length})}
                   </span>
                   {STATUS_ORDER.filter((s) => (result.summary[s] ?? 0) > 0).map((s) => (
                     <span key={s}
-                          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${STATUS_STYLE[s]}`}>
+                          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium ${STATUS_STYLE[s]}`}>
                       {t(STATUS_KEY[s])}
                       <span className="font-semibold tabular-nums">{result.summary[s]}</span>
                     </span>
@@ -338,14 +347,14 @@ export function ModelProbeDialog({
                 {result.results.some((r) => r.gateway_synced === false && !r.gateway_sync_skipped) && (
                   <p className="text-[11px] text-amber-600">{t('accounts.probeSyncFailed')}</p>
                 )}
-                <div className="max-h-[32vh] overflow-auto rounded-xl border border-border/60">
+                <div className="max-h-[32vh] min-w-0 max-w-full overflow-auto rounded-xl border border-border/60">
                   <table className="w-full border-collapse text-[11px]">
                     <thead className="sticky top-0 z-10 bg-background">
                       <tr className="border-b border-border/60 bg-muted/60">
                         <th className="whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold text-foreground/80">
                           {t('accounts.probeAccounts')}
                         </th>
-                        {pickedModels.map((m) => (
+                        {resultSelection.models.map((m) => (
                           <th key={m}
                               className="whitespace-nowrap px-2 py-2 text-center text-[11px] font-semibold text-foreground/80"
                               title={m}>
@@ -355,14 +364,14 @@ export function ModelProbeDialog({
                       </tr>
                     </thead>
                     <tbody>
-                      {accounts.filter((a) => pickedAccounts.includes(a.file)).map((a) => (
+                      {resultSelection.accounts.map((a) => (
                         <tr key={a.file}
                             className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/40">
                           <td className="max-w-[180px] truncate px-3 py-2 font-medium text-foreground/90"
                               title={a.file}>
                             {a.nickname || a.uid || a.file}
                           </td>
-                          {pickedModels.map((m) => {
+                          {resultSelection.models.map((m) => {
                             const r = matrix.get(`${a.file}\u0000${m}`);
                             return (
                               <td key={m} className="px-1.5 py-1.5 text-center">
