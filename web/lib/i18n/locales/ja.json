@@ -23,6 +23,8 @@
     "retryAt": "再試行の許可時刻：",
     "resume": "確認済み・保護停止を解除",
     "resumed": "保護停止を解除しました。他の制限は維持されます",
+    "collapse": "折りたたむ",
+    "expand": "展開",
     "repeatCount": "期限後の短時間での再制限：{n} 回"
   },
   "language": {
@@ -677,8 +679,11 @@
     "createdTitle": "キーを作成しました",
     "createdButRefreshFailed": "キーは作成されましたが、一覧の更新に失敗しました",
     "createdButRefreshFailedHint": "ページを再読み込みすると表示されます",
-    "createdDesc": "今すぐコピーして保存してください。閉じるとキーの全文は再表示できません",
+    "createdDesc": "大切に保管してください。あとから一覧の「キーを表示」で再確認できます",
     "copyKey": "キーをコピー",
+    "keyCopied": "キーをコピーしました",
+    "revealTitle": "キーを表示",
+    "revealDesc": "ブラウザが自動コピーをブロックしました。手動で選択してコピーしてください。表示のたびに監査ログに記録されます。",
     "copyBaseUrl": "Base URL をコピー",
     "savedIt": "保存しました",
     "nameRequired": "キー名を入力してください",
