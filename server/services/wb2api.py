@@ -1507,18 +1507,31 @@ async def restart_container(container: str | None = None) -> tuple[bool, str]:
     return await _docker_restart(config.WB2API_CONTAINER)
 
 
+# `docker restart` 的执行上限（秒）。与原生脚本同一取舍（见 _NATIVE_RESTART_TIMEOUT）：
+# 没有超时的话，一次挂住的 docker 调用会让 reload 状态机永远停在 `running=True`，
+# 界面一直显示「正在应用配置」，后续自动重载也静默失效。正常重启是秒级。
+_DOCKER_RESTART_TIMEOUT = 60
+
+
 async def _docker_restart(name: str) -> tuple[bool, str]:
     """`docker restart <name>`。抽出来是因为「默认上游」与「分组」都要用它。"""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             'docker', 'restart', name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, err = await proc.communicate()
+        _, err = await asyncio.wait_for(proc.communicate(),
+                                        timeout=_DOCKER_RESTART_TIMEOUT)
         if proc.returncode == 0:
             return True, f'容器 {name} 已重启'
         return False, (err.decode(errors='ignore').strip() or f'docker 退出码 {proc.returncode}')
+    except asyncio.TimeoutError:
+        if proc is not None:
+            _kill_quietly(proc)
+        return False, (f'docker restart {name} 超过 {_DOCKER_RESTART_TIMEOUT} 秒未结束，'
+                       f'已终止；请检查 docker 守护进程与容器状态')
     except FileNotFoundError:
         return False, _NO_DOCKER_HINT
     except Exception as exc:  # noqa: BLE001

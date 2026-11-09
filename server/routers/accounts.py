@@ -2331,8 +2331,14 @@ def get_task_scheduler(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.put('/accounts/task-scheduler')
-def keep_task_scheduler(body: dict, user: dict = Depends(security.require_admin)) -> dict:
+async def keep_task_scheduler(body: dict,
+                              user: dict = Depends(security.require_admin)) -> dict:
     """只保留一套调度（issue #375）。
+
+    **必须是 async**：改配置后要 `reload.request_restart()` 调度后台重启，
+    而同步路由会被 FastAPI 放进线程池——那里没有事件循环，重载排不上，
+    还会在服务端留下一个没人清的 `pending`（界面一直显示「正在应用配置」）。
+    与 `settings.save_upstream` 同一取舍。
 
     - `upstream`：关闭面板的签到 / 领取补偿；领奖与做任务仍留在面板（上游没有）。
     - `panel`：开启面板的签到 / 领取补偿，并关闭上游的 checkin / activity，

@@ -97,13 +97,16 @@ def request_restart(upstream: dict | None = None) -> bool:
         loop.create_task(_restart_container_bg(container))
         return True
     global _pending, _worker
-    _pending = True
-    _state['pending'] = True
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # 没有运行中的事件循环：无法后台调度，交由调用方决定是否同步执行
+        # 没有运行中的事件循环：无法后台调度，交由调用方决定是否同步执行。
+        # **不能先写 _pending / _state['pending']**：FastAPI 的同步路由在线程池
+        # 里执行，那里同样没有事件循环；先写状态就没人来清，界面会永远停在
+        # 「正在应用配置」（账号页「只保留上游 / 只保留面板」曾踩中这一点）。
         return False
+    _pending = True
+    _state['pending'] = True
     if _worker is None or _worker.done():
         _worker = loop.create_task(_worker_loop())
     return True

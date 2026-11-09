@@ -303,8 +303,8 @@ class KeepSchedulerEndpointTest(unittest.TestCase):
                                   return_value={'available': True, 'schedule': {
                                       'checkin_enabled': False, 'activity_enabled': False}}),                 mock.patch.object(accounts_router.reload, 'request_restart',
                                   return_value=True):
-            out = accounts_router.keep_task_scheduler({'keep': 'upstream'},
-                                                      user={'role': 'admin'})
+            out = asyncio.run(accounts_router.keep_task_scheduler(
+                {'keep': 'upstream'}, user={'role': 'admin'}))
         save.assert_called_once_with({'schedule': {
             'checkin_enabled': True, 'activity_enabled': True}})
         self.assertFalse(out['plan']['checkin']['enabled'])
@@ -321,8 +321,8 @@ class KeepSchedulerEndpointTest(unittest.TestCase):
                                   return_value={'available': True, 'schedule': {}}), \
                 mock.patch.object(accounts_router.reload, 'request_restart',
                                   return_value=True):
-            out = accounts_router.keep_task_scheduler({'keep': 'panel'},
-                                                      user={'role': 'admin'})
+            out = asyncio.run(accounts_router.keep_task_scheduler(
+                {'keep': 'panel'}, user={'role': 'admin'}))
         save.assert_called_once_with({'schedule': {
             'checkin_enabled': False, 'activity_enabled': False}})
         self.assertTrue(out['plan']['checkin']['enabled'])
@@ -334,8 +334,8 @@ class KeepSchedulerEndpointTest(unittest.TestCase):
         with patcher,                 mock.patch.object(accounts_router.security, 'audit'),                 mock.patch.object(accounts_router.wb2api, 'save_upstream_config') as save,                 mock.patch.object(accounts_router.wb2api, 'load_upstream_config',
                                   return_value={'available': True, 'schedule': {
                                       'checkin_enabled': True, 'activity_enabled': True}}),                 mock.patch.object(accounts_router.reload, 'request_restart') as restart:
-            out = accounts_router.keep_task_scheduler({'keep': 'upstream'},
-                                                      user={'role': 'admin'})
+            out = asyncio.run(accounts_router.keep_task_scheduler(
+                {'keep': 'upstream'}, user={'role': 'admin'}))
         save.assert_not_called()
         restart.assert_not_called()
         self.assertIsNone(out['reload_scheduled'])
@@ -344,6 +344,6 @@ class KeepSchedulerEndpointTest(unittest.TestCase):
     def test_bad_keep_value_is_400(self) -> None:
         from fastapi import HTTPException
         with self.assertRaises(HTTPException) as ctx:
-            accounts_router.keep_task_scheduler({'keep': 'both'},
-                                                user={'role': 'admin'})
+            asyncio.run(accounts_router.keep_task_scheduler(
+                {'keep': 'both'}, user={'role': 'admin'}))
         self.assertEqual(ctx.exception.status_code, 400)
