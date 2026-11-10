@@ -2331,8 +2331,7 @@ def get_task_scheduler(user: dict = Depends(security.current_user)) -> dict:
 
 
 @router.put('/accounts/task-scheduler')
-async def keep_task_scheduler(body: dict,
-                              user: dict = Depends(security.require_admin)) -> dict:
+async def keep_task_scheduler(body: dict, user: dict = Depends(security.require_admin)) -> dict:
     """只保留一套调度（issue #375）。
 
     **必须是 async**：改配置后要 `reload.request_restart()` 调度后台重启，

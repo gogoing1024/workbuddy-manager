@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import json
 import time
+import uuid
 
 from .. import db
 from . import tencent
@@ -74,7 +75,11 @@ def _save_snapshot(snap: dict) -> None:
 
 
 def _package_keys(expiries: list[dict] | None) -> list[list[int]] | None:
-    """把到期积分包列表转成可持久化的 `[到期时刻, 额度]` 键；拿不到返回 None。"""
+    """把到期积分包列表转成可持久化的 `[到期时刻, 额度, 到账时刻]` 键。
+
+    第三个字段是上游 CreateTime（epoch 秒）；缺失/旧补丁给 0，记账时回退采集
+    时刻。拿不到到期列表返回 None（与「空列表」区分）。
+    """
     if not isinstance(expiries, list):
         return None
     out: list[list[int]] = []
@@ -86,8 +91,21 @@ def _package_keys(expiries: list[dict] | None) -> list[list[int]] | None:
             amount = int(e.get('amount'))
         except (TypeError, ValueError):
             continue
-        out.append([at, amount])
-    return sorted(out)
+        try:
+            created = int(e.get('created') or 0)
+        except (TypeError, ValueError):
+            created = 0
+        out.append([at, amount, created])
+    return sorted(out, key=lambda item: (item[0], item[2]))
+
+
+def _package_balances(packages: list[list[int]]) -> dict[int, int]:
+    """按到期时刻汇总剩余额度；兼容旧快照的两元组。"""
+    balances: dict[int, int] = {}
+    for item in packages:
+        at, amount = int(item[0]), int(item[1])
+        balances[at] = balances.get(at, 0) + amount
+    return balances
 
 
 def record_balance(uid: str, nickname: str, credits: int | float | None,
@@ -96,8 +114,9 @@ def record_balance(uid: str, nickname: str, credits: int | float | None,
 
     收入判据（issue #393）优先用**积分包出现**而不是余额净增：签到发 100、同一天
     有 100 的旧包到期时，余额净增为 0，只按净增记账会把这次签到收入完全吞掉。
-    到期包列表（`expiries`）里新出现的 `[到期时刻, 额度]` 就是真实入账；余额净增
-    仍作为回退（老上游/到期列表拿不到时行为不变）。
+    `expiries.amount` 是套餐剩余额度，会随消费减少。按到期时间汇总后，只记
+    剩余额度的正向差额。新增到期桶仍能识别同日旧包到期抵消的签到收入。
+    到期列表不可用时回退余额净增。
 
     首次见到的账号只建立基线、不记流水，否则会把历史余额误报成「刚获得」。
     """
@@ -118,13 +137,20 @@ def record_balance(uid: str, nickname: str, credits: int | float | None,
         if isinstance(raw_packages, list):
             prev_packages = []
             for item in raw_packages:
-                if isinstance(item, list) and len(item) == 2:
+                if isinstance(item, list) and len(item) >= 2:
                     try:
-                        prev_packages.append([int(item[0]), int(item[1])])
+                        prev_packages.append([int(item[0]), int(item[1]),
+                                              int(item[2]) if len(item) >= 3 else 0])
                     except (TypeError, ValueError):
                         continue
     packages = _package_keys(expiries)
-    entry = {'credits': value, 'at': now}
+    # 正余额却没有到期数据，不代表已知的空包基线。
+    if packages == [] and value > 0:
+        packages = None
+    if prev_packages == [] and prev is not None and prev > 0:
+        prev_packages = None
+    previous_observation = prev_raw.get('observation_id', prev_raw.get('at', 0)) if isinstance(prev_raw, dict) else 0
+    entry = {'credits': value, 'at': now, 'observation_id': uuid.uuid4().hex}
     if packages is not None:
         entry['packages'] = packages
     snap[uid] = entry
@@ -133,24 +159,33 @@ def record_balance(uid: str, nickname: str, credits: int | float | None,
     if prev is None:
         return None
 
-    # 1) 新出现的积分包 = 真实收入（不受同日到期抵消影响）。
+    # 1) 同一到期桶的余额下降是消费。补充额度只计增加的部分。
     income = 0
     logs: list[dict] = []
     if packages is not None and prev_packages is not None:
-        before = {(a, n) for a, n in prev_packages}
-        for at, amount in packages:
-            if (at, amount) in before or amount <= 0:
+        before = _package_balances(prev_packages)
+        # 同一到期桶可能有多条包，额度先汇总；到账时刻取该桶里最晚的 CreateTime。
+        created_by_at: dict[int, int] = {}
+        for at, _amount, created in packages:
+            created_by_at[at] = max(created_by_at.get(at, 0), created)
+        for at, amount in _package_balances(packages).items():
+            increase = amount - before.get(at, 0)
+            if increase <= 0 or increase > _MAX_DELTA:
                 continue
-            income += amount
+            income += increase
+            created = created_by_at.get(at, 0)
+            # 用上游到账时刻，而不是采集时刻（issue #414）；异常/未来值回退 now。
+            deliver_at = created if 0 < created <= now else now
             logs.append({
-                'ts': now,
+                'ts': deliver_at,
                 'uid': uid,
                 'kind': 'credit',
                 'level': 'credit',
-                'credits': amount,
-                'message': f'积分包 +{amount}（{datetime.datetime.fromtimestamp(at).strftime("%m-%d %H:%M")} 到期）'
+                'credits': increase,
+                'message': f'积分包 +{increase}（{datetime.datetime.fromtimestamp(at).strftime("%m-%d %H:%M")} 到期）'
                            + (f' · {nickname}' if nickname else ''),
-                'dedup_key': f'credit|{uid}|pkg|{at}|{amount}',
+                # 同一快照的并发观察去重，消费后再次补充相同额度可再次入账。
+                'dedup_key': f'credit|{uid}|pkg-delta|{previous_observation}|{at}|{amount}',
             })
     # 2) 到期列表拿不到/没有新包时，退回余额净增（存量行为）。
     if not logs:
