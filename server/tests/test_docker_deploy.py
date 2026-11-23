@@ -561,7 +561,14 @@ class DockerAssetsTest(unittest.TestCase):
     def test_dockerfile_present_and_non_root(self) -> None:
         df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
         self.assertIn('FROM python:3.12', df)
-        self.assertIn('USER app', df, '不应以 root 运行容器')
+        # 镜像不再写死 USER：属主要按挂载目录的实际属主对齐，那需要 root 权限。
+        # 改为入口脚本以 root 起、改完属主再 su-exec 降权 —— 业务进程仍是非 root，
+        # 这条语义由下面的 EntrypointPermissionsTest 守住。
+        self.assertNotRegex(df, r'(?m)^USER\s+\S+\s*$',
+                            '镜像里不该写死 USER：以 root 起才有机会对齐挂载目录属主')
+        self.assertRegex(df, r'(?m)^ENTRYPOINT\s+\[.*docker-entrypoint\.sh.*\]',
+                         '缺 ENTRYPOINT：属主对齐脚本不会被调用，NAS 上又会 Permission denied')
+        self.assertIn('su-exec', df, '入口脚本靠 su-exec 降权，镜像里必须装它')
         self.assertIn('WB_RUN_MODE=docker', df,
                       '镜像里没设运行形态 —— 容器内会误判成宿主、去调 systemctl')
         # 前端产物必须来自静态导出（server 构建会产出 server 版，FastAPI 托管不了）。
@@ -906,6 +913,47 @@ class ReleasePackageIncludesDockerAssetsTest(unittest.TestCase):
         for asset in ('Dockerfile', 'docker-compose.yml'):
             self.assertIn(asset, block,
                           f'发布包没打进去 {asset} —— 用户拿到包也用不了容器部署')
+
+
+class BuildImageWorkflowTagContractTest(unittest.TestCase):
+    """默认分支镜像构建工作流不得占用发布标签。
+
+    `release.yml` 在发版时推 `:<版本号>` 与 `:latest`，它们是对用户的承诺：
+    钉 `:2.11.23` 拉到的字节必须永远对应 v2.11.23 那个 release。
+
+    而 `build-image.yml` 跑在每次 push 默认分支之后，此时 `server/main.py` 的
+    版本号还是**上一个已发布版本**（只在发版提交里 +1）。若它也推版本号或
+    `:latest`，发版后任何普通提交都会把 `:2.11.23` 覆盖成未发布代码 ——
+    用户钉版本拉到的字节悄悄变了，且没有任何报错。
+
+    所以这里锁两条：工作流存在（有预构建镜像可用），且它只用 sha-* 与分支名
+    这类滚动标签。
+    """
+
+    def _workflow(self) -> str:
+        path = _ROOT / '.github' / 'workflows' / 'build-image.yml'
+        self.assertTrue(path.is_file(), '缺少默认分支镜像构建工作流')
+        return path.read_text(encoding='utf-8')
+
+    def test_tags_do_not_collide_with_release(self) -> None:
+        wf = self._workflow()
+        # 只看真正写进 tags 的那段，避免被注释里的解释误判。
+        self.assertNotRegex(
+            wf, r'(?m)^\s*(echo\s+")?' r'\$\{IMAGE\}:latest',
+            '不要推 :latest —— 那是发版契约，会被未发布代码覆盖')
+        self.assertNotIn('${IMAGE}:${VERSION}', wf,
+                         '不要推 :<版本号> —— 版本号只在发版时前进，'
+                         '这里推会把已发布的 tag 覆盖成未发布代码')
+
+    def test_uses_content_addressed_tag(self) -> None:
+        wf = self._workflow()
+        self.assertIn('sha-${SHORT}', wf, '缺少内容寻址标签 sha-<短哈希>')
+
+    def test_builds_both_architectures(self) -> None:
+        wf = self._workflow()
+        line = next((l for l in wf.splitlines() if 'platforms:' in l), '')
+        self.assertIn('linux/amd64', line)
+        self.assertIn('linux/arm64', line, 'ARM 用户拉不到镜像')
 
 
 class MultiArchImageTest(unittest.TestCase):
@@ -1408,3 +1456,281 @@ class ComposeTimezoneWiringTest(unittest.TestCase):
         self.assertIsNotNone(run_tz, 'environment 缺 TZ')
         self.assertEqual(build_tz.group(1).strip(), run_tz.group(1).strip(),
                          'build 与 runtime 的 TZ 必须一致，否则会按错误时区分天')
+
+    def test_admin_password_is_passed_from_env(self) -> None:
+        """`.env` 里的 WB_ADMIN_PASSWORD 必须真的传进容器。
+
+        `.env.example` 写明「留空则随机生成并打印到日志」；若 compose 里仍是
+        注释掉的固定值，用户按模板填的密码不会生效，只会静默走随机密码。
+        """
+        self.assertIn('WB_ADMIN_PASSWORD: ${WB_ADMIN_PASSWORD', self.src,
+                      'compose 未透传 WB_ADMIN_PASSWORD，.env 里设的初始密码不生效')
+
+    def test_image_name_can_be_overridden(self) -> None:
+        """镜像名可由 WB_MANAGER_IMAGE 覆盖，默认仍是本地构建产物名。"""
+        self.assertIn('${WB_MANAGER_IMAGE:-workbuddy-manager:latest}', self.src,
+                      '镜像名未参数化，无法改用预构建镜像')
+
+class EntrypointPermissionsTest(unittest.TestCase):
+    """镜像入口按 PUID/PGID 对齐挂载目录属主（NAS 不用开 SSH，issue #30 复发）。
+
+    现场：群晖 Container Manager 用 bind mount 部署，宿主 `data/` 属 1026:100，
+    镜像里写死 uid 10001 —— 启动第一步 `DATA_DIR.mkdir()` 就
+    `PermissionError: [Errno 13]`，然后 restart 策略无限重启，日志刷屏。
+
+    修法不能靠文档要求用户 `chown`：NAS 用户多数没有终端。入口脚本以 root 起、
+    把 app 的 uid 改到挂载目录的属主、chown 完再 su-exec 降权，一次搞定。
+    这组断言锁的是「降权不能让业务进程变成 root」和「别假定挂载布局」。
+    """
+
+    def _script(self) -> str:
+        return (_ROOT / 'deploy' / 'docker-entrypoint.sh').read_text(encoding='utf-8')
+
+    def test_script_is_lf_only(self) -> None:
+        raw = (_ROOT / 'deploy' / 'docker-entrypoint.sh').read_bytes()
+        self.assertTrue(raw.startswith(b'#!/bin/sh\n'),
+                        '首行必须是 #!/bin/sh 且为 LF')
+        self.assertNotIn(b'\r', raw,
+                         '出现 CR 会让容器里报 "#!/bin/sh: not found"')
+
+    def test_aligns_owner_then_drops_privileges(self) -> None:
+        s = self._script()
+        for token in ('PUID', 'PGID', 'su-exec', 'chown'):
+            self.assertIn(token, s, '入口脚本缺 %s' % token)
+        self.assertIn('WB_FIX_OWNERSHIP', s, '缺逃生开关：显式 user: 的部署要能关掉本脚本')
+        self.assertRegex(s, r'PUID" = "0"',
+                         '探测到 root 时必须回落 10001，不能把业务进程变成 root')
+
+    def test_covers_both_mount_layouts(self) -> None:
+        """默认布局是 /app/data + /opt/workbuddy2api，也有人把两者收进一个根。"""
+        s = self._script()
+        self.assertIn('/app/data', s)
+        self.assertIn('/opt/workbuddy2api', s)
+        self.assertIn('/opt/workbuddy/manager', s, '单根布局的子目录也要覆盖')
+        self.assertIn('/proc/mounts', s,
+                      '要按实际挂载点探测：只按目录是否存在判断，没挂载时也会误改属主')
+
+    def test_recursive_fix_survives_uid_change(self) -> None:
+        """老部署把子目录建成了 10001，换 PUID 后只看顶层会误判「已经对了」。"""
+        s = self._script()
+        self.assertIn('chown -R', s, '数据目录必须递归修正，否则子目录还是旧属主')
+
+    def test_compose_passes_puid_pgid(self) -> None:
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        env = dc['services']['workbuddy-manager']['environment']
+        for key in ('PUID', 'PGID'):
+            self.assertIn(key, env, 'compose 没透传 %s，入口脚本收不到' % key)
+        self.assertIn('PUID=', (_ROOT / '.env.example').read_text(encoding='utf-8'),
+                      '.env.example 没给出 PUID，用户不知道该填什么')
+
+    def test_image_installs_su_exec_and_shadow(self) -> None:
+        """su-exec / shadow 必须在**运行阶段**装，不能只在别的阶段装。
+
+        为什么必须限定阶段（issue #473 的现场）：这个断言原先只对全文做
+        `apk add[^\n]*su-exec` 匹配，而 `bins` 阶段那一行就满足了 —— 于是
+        v2.11.22 带着「运行阶段没有 su-exec」的镜像发了出去，容器启动几毫秒后
+        `exec: line 161: su-exec: not found`、exit 127、无限重启。
+
+        跨阶段 `COPY` 只搬文件，不会带来 apk 的依赖解析与 /etc/passwd 钩子，
+        所以在 `bins` 里装对运行阶段毫无帮助。这里切出最后一个 `FROM` 之后的
+        内容，只在运行阶段的 RUN 里找。
+        """
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        # 运行阶段 = 最后一个 FROM 之后（多阶段构建里最后一个就是最终镜像）。
+        runtime = df.rsplit('\nFROM ', 1)[-1]
+        self.assertRegex(runtime, r'apk add[^\n]*su-exec',
+                         '运行阶段没有 su-exec：入口脚本降权会 exit 127')
+        self.assertRegex(runtime, r'apk add[^\n]*shadow',
+                         '运行阶段没有 shadow：busybox 的 adduser 没有 '
+                         'usermod/groupmod，PUID/PGID 对齐全失效')
+
+    def test_runtime_stage_tools_cover_entrypoint_commands(self) -> None:
+        """入口脚本调用的外部工具，运行阶段都得装。
+
+        这是 #473 的一般化防线：不只盯 su-exec/shadow 两个名字，而是把入口脚本里
+        **明确作为命令执行**的外部工具抽出来，逐个确认运行阶段的 `apk add` 覆盖到
+        了。往入口脚本里加一个新工具却忘了装包时，这条会先红。
+        """
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        runtime = df.rsplit('\nFROM ', 1)[-1]
+        entry = (_ROOT / 'deploy' / 'docker-entrypoint.sh').read_text(encoding='utf-8')
+
+        # 运行阶段 apk add 的包名 → 它提供的可执行文件。
+        PACKAGE_BINARIES = {
+            'su-exec': {'su-exec'},
+            'shadow': {'usermod', 'groupmod'},
+            'curl': {'curl'},
+            'git': {'git'},
+        }
+        installed: set[str] = set()
+        for m in re.finditer(r'apk add[^\n]*', runtime):
+            # 行尾有 `;` 与续行反斜杠，按空白切完还要剥掉标点。
+            for word in re.findall(r'[A-Za-z][\w-]*', m.group(0)):
+                installed |= PACKAGE_BINARIES.get(word, set())
+
+        # 只认「行首 / 条件后 / 管道后」这种命令起始位置的候选词，再排除 shell
+        # 关键字与函数名。这样 `$(dirname ...)`、`[ -x ... ]`、heredoc 里的 Python
+        # 都不会被当成外部命令。
+        SHELL_KEYWORDS = {
+            'if', 'then', 'else', 'elif', 'fi', 'for', 'do', 'done', 'case', 'esac',
+            'while', 'until', 'return', 'exit', 'local', 'export', 'set', 'shift',
+            'trap', 'exec', 'wait', 'true', 'false', 'echo', 'cd', 'test', 'command',
+            'break', 'continue', 'unset', 'readonly', 'eval', 'source', '.',
+            # busybox/基础镜像自带
+            'stat', 'awk', 'dirname', 'readlink', 'cat', 'rm', 'mkdir', 'chown',
+            'chmod', 'id', 'kill', 'sed', 'cp', 'mv', 'ln', 'ls', 'grep', 'tr',
+        }
+        # 本脚本内定义的函数（不是外部命令）。
+        defined = set(re.findall(r'(?m)^([A-Za-z_][\w]*)\s*\(\)\s*\{', entry))
+
+        used: set[str] = set()
+        in_heredoc = False
+        for raw in entry.splitlines():
+            line = raw.strip()
+            if in_heredoc:
+                if line.startswith(heredoc_end):  # type: ignore[possibly-undefined]
+                    in_heredoc = False
+                continue
+            if not line or line.startswith('#'):
+                continue
+            # 剥掉行内注释：`detect() {  # $1 = u | g` 的 `| g` 不是管道命令。
+            # 只在 ` #` 处切，避免误伤 `${VAR#prefix}` 这类参数展开。
+            line = re.split(r'\s#\s', line, maxsplit=1)[0].rstrip()
+            if not line:
+                continue
+            m = re.search(r'<<-?\s*[\'"]?([A-Za-z_][\w]*)', line)
+            if m:
+                heredoc_end = m.group(1)
+                in_heredoc = True
+            # 命令起始位置：行首、`; ` `&&` `||` `|` `(` 之后、`then/do/else` 之后。
+            # 要求候选词后面紧跟空白或行尾 —— 否则 `-o -g "$PGID"` 里的 `g`、
+            # `--supervise` 里的词也会被误当成命令。
+            for cm in re.finditer(
+                    r'(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b)\s*'
+                    r'([a-z][a-z0-9_-]*)(?=\s|$)', line):
+                used.add(cm.group(1))
+
+        missing = sorted(used - installed - SHELL_KEYWORDS - defined)
+        self.assertEqual([], missing,
+                         '入口脚本用到但运行阶段没有的命令：%s（#473 同类问题）'
+                         % ', '.join(missing))
+
+    def test_skip_ownership_still_generates_upstream_config(self) -> None:
+        """`WB_FIX_OWNERSHIP=0` 只该跳过 chown，不该跳过首启配置生成。
+
+        那个开关的文档语义是「我自己接管容器身份」。但上游 config.json 的
+        兜底生成与属主无关 —— 少了它，上游容器会因读不到配置反复重启，
+        而日志里只有上游的报错，看不出是管理端少走了一步。
+
+        这条锁住结构：开关只出现在「root 且要修属主」这个条件的**同一行**，
+        而且末尾那条 init_upstream_conf 不在任何 if 分支里（两条路径都会走到）。
+        """
+        src = (_ROOT / 'deploy' / 'docker-entrypoint.sh').read_text(encoding='utf-8')
+
+        # 开关不能再有独立的 early-exit 分支（`exec "$@"` 直接跳出脚本）。
+        self.assertNotRegex(
+            src, r'if \[ "\$\{WB_FIX_OWNERSHIP:-1\}" != "1" \]; then\s*\n\s*exec',
+            'WB_FIX_OWNERSHIP=0 不能直接 exec —— 那样首启配置不会生成')
+
+        # 开关应与 root 判定合并在同一个 if 里。
+        self.assertRegex(
+            src, r'if \[ "\$\{WB_FIX_OWNERSHIP:-1\}" = "1" \] && '
+                 r'\[ "\$\(id -u\)" = "0" \]; then',
+            'WB_FIX_OWNERSHIP 应与 root 判定合并在同一个条件里')
+
+        # 末尾那句 init_upstream_conf 必须在顶格（不在任何 if 分支内）：
+        # 顶格 = 该行前导只有空白，且前一个非空行不是 `then`/`else` 之类的分支起始。
+        tail = src.rsplit('init_upstream_conf "" ""', 1)
+        self.assertEqual(2, len(tail), '末尾缺少 init_upstream_conf 兜底调用')
+        last = src.rfind('init_upstream_conf "" ""')
+        line_start = src.rfind('\n', 0, last) + 1
+        self.assertEqual('init_upstream_conf "" ""',
+                         src[line_start:last + len('init_upstream_conf "" ""')].strip(),
+                         '兜底的 init_upstream_conf 应独占一行')
+        self.assertNotIn(src[line_start:last], (' ', '\t'),
+                         '末尾的 init_upstream_conf 不能在 if 分支里（有缩进）—— '
+                         '它在 WB_FIX_OWNERSHIP=0 与非 root 两条路径上都要执行')
+
+
+class BundledUpstreamAssetsTest(unittest.TestCase):
+    """镜像自带上游脚本与配置模板，做到「只拉镜像、不做宿主准备」（issue #30 后续）。
+
+    现场：NAS 上按单根布局部署，`data/workbuddy2api/` 只有 `auths/` —— 没有上游
+    源码目录，也没挂 docker.sock，于是「成长任务」三条取脚本的路全断，界面只报
+    「未找到任务脚本」。而任务脚本只是几个纯标准库 Python 文件，完全可以随镜像
+    分发：它不涉及上游服务本身，也就不违反「镜像不含上游服务」那条取舍。
+
+    这组断言锁三件事：脚本真的被打进镜像、面板按「宿主 → 内置 → docker cp」的
+    顺序找它、以及首次启动会就地生成上游 config.json（上游容器才好直接挂）。
+    """
+
+    def test_image_bakes_upstream_scripts(self) -> None:
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertRegex(df, r'ARG UPSTREAM_IMAGE=',
+                         '缺可覆盖的上游镜像参数，离线/钉版本时没法构建')
+        self.assertRegex(df, r'FROM \$\{UPSTREAM_IMAGE\} AS upstream',
+                         'ARG 不能直接写进 COPY --from，要先建成阶段')
+        self.assertIn('COPY --from=upstream /app/scripts /app/upstream/scripts', df)
+        self.assertIn(
+            'COPY --from=upstream /app/config.json /app/upstream/config.example.json',
+            df,
+            '配置模板也要随镜像：首次启动靠它生成 config.json',
+        )
+
+    def test_script_path_prefers_bundled_over_docker_cp(self) -> None:
+        src = (_ROOT / 'server' / 'services' / 'taskrun.py').read_text(encoding='utf-8')
+        self.assertIn("_BUNDLED_SCRIPT_DIR = Path('/app/upstream/scripts')", src)
+        body = src[src.index('def _script_path()'):]
+        body = body[:body.index('def _python()')]
+        self.assertLess(
+            body.index('_bundled_script()'), body.index('extract_scripts'),
+            '内置脚本要排在 docker cp 之前：后者要求挂 docker.sock',
+        )
+
+    def test_fallback_does_not_shadow_host_source(self) -> None:
+        """宿主机有上游源码时仍以宿主机为准：那条路径能跟着「一键更新」走。"""
+        src = (_ROOT / 'server' / 'services' / 'taskrun.py').read_text(encoding='utf-8')
+        body = src[src.index('def _script_path()'):]
+        body = body[:body.index('def _python()')]
+        self.assertLess(body.index('_host_script()'), body.index('_bundled_script()'))
+
+    def test_entrypoint_materialises_upstream_config_once(self) -> None:
+        s = (_ROOT / 'deploy' / 'docker-entrypoint.sh').read_text(encoding='utf-8')
+        self.assertIn('init_upstream_conf', s)
+        self.assertIn('/app/upstream/config.example.json', s)
+        self.assertIn('WB_UPSTREAM_CONFIG', s,
+                      '目标路径要走配置变量，否则单根布局下会写错地方')
+        self.assertIn('[ ! -f "$_cfg" ]', s,
+                      '只能在文件缺失时生成，绝不能覆盖已有的 api_key / 线路表')
+        self.assertIn('api_key', s)
+        self.assertIn('mkdir -p "$_dir/auths"', s,
+                      '上游的相对路径需要 auths/ 与 data/ 先存在')
+
+    def test_full_compose_runs_manager_and_upstream(self) -> None:
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.full.yml').read_text(encoding='utf-8'))
+        svcs = dc['services']
+        self.assertIn('workbuddy2api', svcs, '缺上游服务就还是「只起了一半」')
+        mgr, up = svcs['workbuddy-manager'], svcs['workbuddy2api']
+
+        self.assertEqual(mgr['environment']['WB2API_BASE'], 'http://workbuddy2api:7863',
+                         '同网络里要用服务名，不能用 host.docker.internal')
+        self.assertEqual(mgr['environment']['WB_UPSTREAM_CONFIG'],
+                         '/opt/workbuddy/workbuddy2api/config.json')
+        self.assertIn('10001', str(mgr['environment']['PUID']),
+                      '上游镜像固定 10001，共享 auths 时 uid 必须一致')
+        self.assertEqual(up['working_dir'], '/conf',
+                         '上游的 auth_dir/state_file 是相对工作目录的')
+        self.assertEqual(up['volumes'], ['${WB_DATA_VOLUME:-./data}/workbuddy2api:/conf'],
+                         '只挂一个目录：单独挂 config.json 文件时，文件不存在会被建成目录')
+        self.assertEqual(up['entrypoint'], ['/app/wb2api', '-config', '/conf/config.json'],
+                         '要用 entrypoint 覆盖：镜像 ENTRYPOINT 已带 -config，写 command '
+                         '只会变成追加参数，读到的还是镜像内那份示例配置')
+        self.assertNotIn('command', up, 'entrypoint 已经给出完整命令，别再写 command')
+        self.assertNotIn('ports', up, '7863 不该发布到宿主，同网络访问即可')
+        self.assertIn('condition', up.get('depends_on', {}).get('workbuddy-manager', {}),
+                      '上游要等管理端健康后再起：config.json 由管理端首次生成')
+        for vol in mgr['volumes']:
+            self.assertNotIn('docker.sock', str(vol),
+                             '本文件的卖点是不交出宿主 root，不能挂 socket')
