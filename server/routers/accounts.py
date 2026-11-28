@@ -17,8 +17,8 @@ from fastapi.responses import StreamingResponse
 from .. import config, db, security, upstreamsvc
 from ..iputil import client_ip
 from ..services import (
-    accountorder, credits as creditsvc, dailyplan, modelcatalog, reload, renew,
-    tasklog, taskrun, tencent, wb2api,
+    accountcache, accountorder, credits as creditsvc, dailyplan, modelcatalog,
+    reload, renew, speedhealth, tasklog, taskrun, tencent, wb2api,
 )
 from ..services.realm import realm_of, supports_checkin
 from ..services import taskpacing
@@ -82,7 +82,7 @@ def _uploaded_account(raw: object, filename: str) -> dict:
     if expires_at < 0:
         raise ValueError('expiresAt 必须是非负数字')
 
-    return {
+    result = {
         'uid': uid,
         'access_token': access_token,
         'refresh_token': str(value('refreshToken', 'refresh_token') or ''),
@@ -95,6 +95,11 @@ def _uploaded_account(raw: object, filename: str) -> dict:
         'proxy': str(value('proxy') or ''),
         '_filename': filename,
     }
+    # 账号级「不参与定时任务」（issue #437）：导出包里有这个键才透传；缺省
+    # **不写**，由 write_auth_file 沿用旧文件的值（覆盖导入不该静默清掉它）。
+    if 'skip_tasks' in raw:
+        result['skip_tasks'] = raw.get('skip_tasks') is True
+    return result
 
 
 def _uploaded_entries(raw: object) -> list[object]:
@@ -260,6 +265,10 @@ async def upload_accounts(
         security.audit(user, 'accounts.import', group['name'],
                        f'新增 {len(added)} / 覆盖 {len(overwritten)} / '
                        f'拒绝 {len(rejected)} / 失败 {len(failed)}；来源 {ip}', ip=ip)
+    if uploaded:
+        # 导入会新增 / 改写账号文件：目录 mtime 虽已变，仍显式失效（同秒内多次
+        # 导入时目录 mtime 可能不变，见 accountcache 的说明）。
+        _invalidate_account_cache(group)
     return {
         'ok': not failed and not rejected,
         'uploaded': uploaded,
@@ -430,6 +439,27 @@ def _group_dir(group: dict) -> Path | None:
     return Path(raw) if raw else None
 
 
+def _account_cache_key(group: dict, base_dir: Path | None) -> tuple:
+    """账号列表缓存的键：分组 + 目录 + **目录 mtime**（issue #444）。
+
+    mtime 放进键里是为了让「增删账号 / 改名禁用」这类文件动作自动换键，
+    不必依赖每条写路径都记得失效缓存——漏一条也只是多一次扫描，不会返回旧列表。
+    目录不存在（分组未配置账号目录）时用 0，缓存键仍按分组隔离。
+    """
+    stamp = 0
+    if base_dir is not None:
+        try:
+            stamp = base_dir.stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+    return (group.get('id'), str(base_dir or ''), stamp)
+
+
+def _invalidate_account_cache(group: dict) -> None:
+    """本分组的账号列表缓存作废（写操作收尾统一走这里）。"""
+    accountcache.invalidate(group.get('id'))
+
+
 def _require_dir(group: dict) -> Path:
     """要求该分组可管理账号：没有本地账号目录就明确拒绝。
 
@@ -480,6 +510,7 @@ async def account_set_proxy(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail='账号文件不存在') from exc
     creditsvc.invalidate()
+    _invalidate_account_cache(group)
     scheduled = reload.request_restart(_reload_target(group))
     return {'ok': True, **result, 'reload_triggered': scheduled}
 
@@ -512,8 +543,188 @@ async def account_set_weight(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail='账号文件不存在') from exc
     security.audit(user, 'update_account_weight', filename, f"weight={result['weight']}")
+    _invalidate_account_cache(group)
     scheduled = reload.request_restart(_reload_target(group))
     return {'ok': True, **result, 'reload_triggered': scheduled}
+
+
+@router.post('/accounts/skip-tasks')
+async def account_set_skip_tasks(
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """设置 / 清除账号级「不参与定时任务」开关（issue #437）。
+
+    语义是**只转发、不跑任务**：账号仍在号池里、照常被选号转发，但上游 scheduler
+    的签到 / 保活 / 旅行 / 活跃 / 开学季 / 夜猫子等任务逐号跳过它。企业账号没有
+    个人成长体系（签到恒 400 code=10001），此前只能整号停用（连转发一起停掉），
+    这个开关补的正是中间那档。
+
+    body: `{file?, uid?, enabled: bool, upstream_id?, reload?}` —— `file` 与 `uid`
+    二选一，都传时以 `file` 为准；`enabled` 必须是布尔值（不接受 "true"/1 这类
+    弱类型，避免把非 JSON bool 写进上游文件——上游 auth.Parse 对 bool 字段是
+    严格解析的）。分组也走 body（本端点的写参数一律 JSON body，见
+    test_request_binding 的 query 审计）。
+    写的是 auth 文件顶层 `skip_tasks`，读—改—原子写，**其余字段与未知键原样保留**。
+
+    与「临时停用」的区别：停用（改名 / manual_disabled）会改变转发行为；本开关
+    **不影响转发**，只影响任务。
+    """
+    if not isinstance(body.get('enabled'), bool):
+        raise HTTPException(status_code=400, detail='enabled 必须是布尔值')
+    filename = str(body.get('file') or '').strip()
+    uid = str(body.get('uid') or '').strip()
+    if not filename and not uid:
+        raise HTTPException(status_code=400, detail='必须提供 file 或 uid')
+    raw_upstream = body.get('upstream_id')
+    upstream_id: int | None = None
+    if raw_upstream not in (None, '', 0, '0'):
+        try:
+            upstream_id = int(raw_upstream)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail='upstream_id 不合法') from None
+    group = _group(upstream_id)
+    auth_dir = _require_dir(group)
+    try:
+        # 读整份 JSON + fsync + 原子替换：放到线程里，别在事件循环上做磁盘 I/O。
+        result = await asyncio.to_thread(
+            wb2api.set_account_skip_tasks,
+            filename, bool(body['enabled']), auth_dir, uid=uid)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail='账号文件不存在') from exc
+    if result['changed']:
+        # 与其他写路径一致显式失效：网络/共享文件系统上目录 mtime 可能不够细。
+        _invalidate_account_cache(group)
+    security.audit(user, 'update_account_skip_tasks',
+                   result['file'], f"skip_tasks={result['skip_tasks']}")
+    scheduled = False
+    if result['changed'] and body.get('reload', True) is not False:
+        scheduled = reload.request_restart(_reload_target(group))
+    return {'ok': True, **result, 'reload_triggered': scheduled}
+
+
+@router.get('/accounts/speed-health')
+async def account_speed_health(
+    window: int = Query(900, ge=60, le=86400),
+    upstream_id: int | None = Query(None),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """按实测吞吐给出「谁在慢档」和建议权重（**只读**，不动账号文件）。
+
+    口径（与统计页 issue #214 一致）：
+      · 生成耗时 = latency_ms - COALESCE(first_token_ms, 0)；
+      · rate = completion_tokens / (生成耗时 / 1000)；
+      · 只统计流式 + 200 + completion_tokens>=300 + 生成耗时为正的样本；
+      · 基准取同池中位数（相对值），上游整体变慢时 score 仍接近 1。
+
+    realm 隔离：cn / global 各算一份基准；同一 realm 被多个分组共用时
+    `request_logs` 没有 upstream_id 可区分归属，返回 409 而不是给污染结论。
+    """
+    group = _group(upstream_id)
+    auth_dir = _require_dir(group)
+    data = await asyncio.to_thread(speedhealth.evaluate_group, auth_dir, window)
+    if data.get('conflicts'):
+        raise HTTPException(
+            status_code=409,
+            detail=('以下分组与当前分组共用同一版本（realm）：'
+                    f'{"、".join(data["conflicts"])}。request_logs 没有 upstream_id 列，'
+                    '无法区分请求属于哪个分组，因此不做池内比较。请先按 realm 拆开分组。'),
+        )
+    scheduler = await asyncio.to_thread(speedhealth.state)
+    return {'window_seconds': window, 'scheduler': scheduler, **data}
+
+
+@router.get('/accounts/speed-health/settings')
+async def account_speed_health_settings(
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """读自动降权的开关（默认关）与上次运行结果。"""
+    return await asyncio.to_thread(speedhealth.state)
+
+
+@router.put('/accounts/speed-health/settings')
+async def account_speed_health_settings_put(
+    body: dict = Body(...),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """改开关 / 间隔 / 窗口 / 是否预演。改完立即生效（调度器每轮重读设置）。"""
+    try:
+        saved = await asyncio.to_thread(speedhealth.save_settings, body)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    security.audit(user, 'update_speed_health', '', json.dumps(saved, ensure_ascii=False))
+    return {'ok': True, **saved}
+
+
+@router.post('/accounts/speed-health/run')
+async def account_speed_health_run(
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """立刻跑一轮（受 enabled 开关约束，不会绕过它；与调度器互斥）。"""
+    result = await speedhealth.run_once()
+    if result.get('skipped') == 'busy':
+        raise HTTPException(status_code=409, detail='另一轮吞吐评估正在运行，请稍后重试')
+    return result
+
+
+def _speed_dry_run(body: dict) -> bool:
+    """body.dry_run 默认 true；字符串/数字也按布尔语义收（不把 'false' 当真）。"""
+    raw = body.get('dry_run', True) if isinstance(body, dict) else True
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() not in ('0', 'false', 'off', 'no')
+
+
+@router.post('/accounts/speed-health/apply')
+async def account_speed_health_apply(
+    body: dict = Body(...),
+    upstream_id: int | None = Query(None),
+    user: dict = Depends(security.require_admin),
+) -> dict:
+    """把建议权重写进账号文件。`dry_run` 默认 true，只回显不落盘。
+
+    降权同时记下原始权重与恢复时间（6 小时到期 / score 回到 HIGH_SCORE 提前
+    恢复），见 services/speedhealth.py 的「恢复路径」。
+
+    为什么**不**触发上游重启：权重写在账号文件里，上游每 5 秒轮询 auths 目录
+    热加载（internal/pool/watch.go，upsertLocked 整体替换 *auth.Auth），
+    5 秒内自然生效。重启会打断在途请求、清空上游内存状态，代价远大于收益——
+    这一点与手动改权重那条路由不同，那里为了「立刻生效」才去重载。
+    """
+    dry = _speed_dry_run(body)
+    try:
+        window = int((body or {}).get('window', 900) or 900)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail='window 必须是整数秒') from exc
+    window = max(60, min(86400, window))
+    auth_dir = _require_dir(_group(upstream_id))
+    out = await speedhealth.apply_for_group(auth_dir, window, dry_run=dry)
+    if out.get('skipped') == 'busy':
+        raise HTTPException(status_code=409, detail='另一轮吞吐评估正在运行，请稍后重试')
+    if out.get('skipped') == 'group-conflict':
+        raise HTTPException(
+            status_code=409,
+            detail=('以下分组与当前分组共用同一版本（realm）：'
+                    f'{"、".join(out.get("conflict_groups") or [])}。'
+                    'request_logs 没有 upstream_id 列，无法区分请求归属，已拒绝评估。'),
+        )
+    if not dry:
+        for realm in out.get('realms') or []:
+            for item in realm.get('applied') or []:
+                if item.get('ok'):
+                    security.audit(user, 'auto_account_weight',
+                                   str(item.get('file') or ''),
+                                   f"{item.get('from')}->{item.get('to')}")
+            for item in realm.get('restored') or []:
+                if item.get('ok'):
+                    security.audit(user, 'restore_account_weight',
+                                   str(item.get('file') or ''),
+                                   f"{item.get('demoted_to')}->{item.get('original_weight')}")
+        # 权重写进了账号文件（列表里带 weight 字段），作废本组缓存。
+        _invalidate_account_cache(_group(upstream_id))
+    return out
 
 
 @router.get('/accounts')
@@ -530,6 +741,13 @@ async def list_accounts(upstream_id: int | None = Query(None),
     """
     group = _group(upstream_id)
     base_dir = _group_dir(group)
+    # 短 TTL 缓存（issue #444）：196 个账号时一次完整扫描 + 上游 /status 往返
+    # 要几百毫秒到数秒；仪表板首屏与页面切换会重复触发同一份。4 秒内命中直接
+    # 返回上一次的响应，数字口径完全一致（见 services/accountcache 的说明）。
+    cache_key = _account_cache_key(group, base_dir)
+    cached = accountcache.get(cache_key)
+    if cached is not None:
+        return cached
     # 没有本地目录的分组**不能**去读默认目录：那会把默认池的账号显示成这个
     # 分组的账号——与「移动时落错目录」是同一类串组错误。列表给空，由
     # manageable 标记让界面说明「该分组未配置本地账号目录」。
@@ -553,7 +771,7 @@ async def list_accounts(upstream_id: int | None = Query(None),
         a['added_at'] = added_times.get(uid)
         a['checkin_today'] = done_today.get(uid)
     synced = sum(1 for a in accounts if a.get('credits') is not None)
-    return {
+    payload = {
         'total': len(accounts),
         'accounts': accounts,
         'pool_synced': synced,
@@ -568,6 +786,8 @@ async def list_accounts(upstream_id: int | None = Query(None),
         'auth_dir': str(base_dir or ''),
         'manageable': base_dir is not None,
     }
+    accountcache.put(cache_key, payload)
+    return payload
 
 
 @router.get('/accounts/order')
@@ -1230,6 +1450,15 @@ def _save_and_finish(result: dict, realm_of_result: str, region_msg: str,
 
     if not existed:
         db.record_account_added(str(result['uid']), auth_dir)
+    # 新账号已落盘 / 旧账号凭证已换：账号列表缓存必须立刻作废（issue #444）。
+    _invalidate_account_cache(group)
+
+    # 重登成功：清掉「登录态失效」标记（issue #490）。否则这个账号会一直带着
+    # 「需重登」徽章，直到下一次积分查询成功才消失 —— 用户刚登完就看到旧告警。
+    try:
+        creditsvc.clear_session_dead(str(result.get('uid') or ''))
+    except Exception:  # noqa: BLE001
+        pass
 
     # 目标账号只在这里取一次：下面要丢掉 state 上的记账，而提交方（auth_poll）
     # 还要用它做当场解除禁用。
@@ -1302,7 +1531,8 @@ def _load(filename: str, auth_dir: Path | None = None) -> dict:
 @router.post('/accounts/{filename}/checkin')
 async def account_checkin(filename: str, upstream_id: int | None = Query(None),
                           user: dict = Depends(security.require_admin)) -> dict:
-    base_dir = _require_dir(_group(upstream_id))
+    group = _group(upstream_id)
+    base_dir = _require_dir(group)
     raw = _load(filename, base_dir)
     acct = raw.get('account') or {}
     auth = raw.get('auth') or {}
@@ -1352,6 +1582,8 @@ async def account_checkin(filename: str, upstream_id: int | None = Query(None),
     if ok:
         # 签到会改变余额，先失效缓存再查实时值
         creditsvc.invalidate(uid)
+        # 列表里的「今日已签到」随之变化（issue #444 的缓存要立刻作废）。
+        _invalidate_account_cache(group)
         _, credits, _, _, _, expiries = await creditsvc.get_credits(
             _auth_dict(raw, base_dir), nickname=str(acct.get('nickname') or ''),
         )
@@ -1615,6 +1847,12 @@ async def checkin_all(upstream_id: int | None = Query(None),
         filename = acc['file']
         uid = acc.get('uid', '')
         nickname = acc.get('nickname', '')
+        # 账号级「不参与定时任务」（issue #437）：批量签到也跳过它（上游调度已
+        # 跳过；面板这条批量路径若不跳过，企业账号仍会在这里白打 400/10001）。
+        # 这是用户显式设置，不是失败：以 skipped 回执，不计入 total 分母。
+        if acc.get('skip_tasks'):
+            return {'nickname': nickname, 'ok': False, 'skipped': True,
+                    'skip_tasks': True, 'message': '已设置不参与定时任务，已跳过'}
         try:
             raw = wb2api.read_account_file(filename, base_dir)
             auth = raw.get('auth') or {}
@@ -1665,6 +1903,7 @@ async def checkin_all(upstream_id: int | None = Query(None),
         'checkin', accounts, one,
         needs_request=lambda a: (a.get('uid') not in done_today
                                  and a.get('checkin_supported') is not False
+                                 and not a.get('skip_tasks')
                                  and not a.get('invalid_reason')),
     )
     # 两类账号都不进 `total` 分母，各自单独报数：
@@ -1678,11 +1917,18 @@ async def checkin_all(upstream_id: int | None = Query(None),
     already = [r for r in applicable if r.get('already')]
     attempted = [r for r in applicable if not r.get('already')]
     succeeded = sum(1 for r in attempted if r['ok'])
+    if succeeded or already:
+        # 有账号的「今日已签到」变化了：列表缓存作废（issue #444）。
+        _invalidate_account_cache(_group(upstream_id))
+    # 「不参与定时任务」是用户显式设置，不是「国际版不适用」：单列一项，
+    # 否则界面那句「另有 N 个账号不适用：国际版无签到体系」会把它们算进去。
+    skip_tasks_n = sum(1 for r in results if r.get('skip_tasks'))
     return {
         'total': len(attempted),
         'succeeded': succeeded,
         'already': len(already),
-        'skipped': len(results) - len(applicable),
+        'skipped': len(results) - len(applicable) - skip_tasks_n,
+        'skip_tasks': skip_tasks_n,
         'results': list(results),
     }
 
@@ -1802,6 +2048,10 @@ def _nickname_resolver() -> object:
     """
     nick_by_uid: dict[str, str] = {}
     nick_by_prefix: dict[str, str] = {}
+    # 旧版续期失败行把 uid 落成了**账号文件名**（`_record` 取 uid or file，
+    # 而当时 uid 为空）。读端必须兼容，否则历史行在版本视图下被过滤掉、
+    # 或显示成一串文件名（PR #477）。这里按文件名（含去掉 .json 的形态）建反向表。
+    nick_by_file: dict[str, str] = {}
     ambiguous: set[str] = set()
     try:
         # 默认目录 + 各分组登记的账号目录：日志里的 uid 可能来自任何一个池，
@@ -1815,6 +2065,12 @@ def _nickname_resolver() -> object:
             for acc in wb2api.list_auth_accounts(base_dir):
                 auid = str(acc.get('uid') or '')
                 nick = str(acc.get('nickname') or '')
+                fname = str(acc.get('file') or '')
+                if nick and fname:
+                    nick_by_file.setdefault(fname, nick)
+                    base_name = fname[:-5] if fname.endswith('.json') else fname
+                    if base_name:
+                        nick_by_file.setdefault(base_name, nick)
                 if not auid or not nick:
                     continue
                 nick_by_uid[auid] = nick
@@ -1831,6 +2087,8 @@ def _nickname_resolver() -> object:
             return ''
         if uid in nick_by_uid:
             return nick_by_uid[uid]
+        if uid in nick_by_file:
+            return nick_by_file[uid]
         prefix = uid[:8]
         return '' if prefix in ambiguous else nick_by_prefix.get(prefix, '')
 
@@ -1854,11 +2112,22 @@ def _realm_uid_filter(realm: str | None) -> dict[str, str] | None:
         accounts = wb2api.list_auth_accounts()
     except Exception:  # noqa: BLE001
         return {}
-    return {
-        str(a.get('uid')): str(a.get('realm') or 'cn')
-        for a in accounts
-        if a.get('uid')
-    }
+    out: dict[str, str] = {}
+    for a in accounts:
+        uid = str(a.get('uid') or '')
+        if not uid:
+            continue
+        realm_of_account = str(a.get('realm') or 'cn')
+        out[uid] = realm_of_account
+        # 旧版续期失败行把 uid 落成了文件名（见 `_nickname_resolver` 的注释）。
+        # 把文件名也映射到版本，``_uid_matches_realm`` 的精确匹配就能覆盖它们。
+        fname = str(a.get('file') or '')
+        if fname:
+            out.setdefault(fname, realm_of_account)
+            base_name = fname[:-5] if fname.endswith('.json') else fname
+            if base_name:
+                out.setdefault(base_name, realm_of_account)
+    return out
 
 
 def _uid_matches_realm(uid: str, realm_map: dict[str, str] | None, realm: str) -> bool:
@@ -2043,6 +2312,8 @@ async def task_run_start(
         # 前置拒绝（脚本缺失/已有任务在跑/参数不合法）用 409 表达「状态冲突」，
         # 与「请求本身有错」（400）区分开。
         raise HTTPException(status_code=409, detail=msg)
+    # 任务会改写账号的积分 / 冷却 / 签到状态：列表缓存作废（issue #444）。
+    _invalidate_account_cache(group)
     return {'ok': True, 'message': msg}
 
 
@@ -2344,6 +2615,8 @@ async def account_refresh(filename: str, upstream_id: int | None = Query(None),
     # 非空元组恒为真，从而在重载失败时仍报「已重载生效」（且 reload_triggered
     # 会变成数组、与前端声明的 boolean 不符）。
     reloaded, reload_error = await reload.restart_now(upstream=_reload_target(group))
+    # 令牌已换发：列表里的有效期 / 签发时间都变了，缓存立刻作废。
+    _invalidate_account_cache(group)
     return {
         'ok': True,
         'message': result['message'] + _refresh_reload_tail(group, reloaded, reload_error),
@@ -2396,6 +2669,8 @@ async def refresh_all_tokens(upstream_id: int | None = Query(None),
     reloaded, reload_error = False, ''
     if succeeded > 0:
         reloaded, reload_error = await reload.restart_now(upstream=_reload_target(group))
+        # 有账号换发了令牌：列表缓存作废（issue #444）。
+        _invalidate_account_cache(group)
 
     return {
         'total': len(results),
@@ -2449,6 +2724,8 @@ async def run_refresh_plan_now(user: dict = Depends(security.require_admin)) -> 
     """
     stats = await renew.refresh_all(force=True)
     renew.mark_plan_ran()
+    # 全量刷新会遍历**所有分组**的账号，缓存整表清空（issue #444）。
+    accountcache.clear()
     plan = renew.get_plan()
     return {**stats, 'last_run': plan['last_run'],
             'next_run': renew.plan_next_run(plan)}
@@ -2482,6 +2759,10 @@ async def claim_compensation_all(upstream_id: int | None = Query(None),
         filename = acc['file']
         uid = acc.get('uid', '')
         nickname = acc.get('nickname', '')
+        # 账号级「不参与定时任务」（issue #437）：批量领取补偿同样跳过。
+        if acc.get('skip_tasks'):
+            return {'nickname': nickname, 'status': 'skipped', 'credit': 0,
+                    'message': '已设置不参与定时任务，已跳过'}
         try:
             raw = wb2api.read_account_file(filename, base_dir)
             auth = raw.get('auth') or {}
@@ -2514,7 +2795,9 @@ async def claim_compensation_all(upstream_id: int | None = Query(None),
 
     results = await taskpacing.run_accounts(
         'compensation', accounts, one,
-        needs_request=lambda a: supports_checkin(realm_of(a)) and not a.get('invalid_reason'),
+        needs_request=lambda a: (supports_checkin(realm_of(a))
+                                 and not a.get('skip_tasks')
+                                 and not a.get('invalid_reason')),
     )
     # 分母只算**真的发了请求**的账号：already / skipped 既不是成功也不是失败，
     # 算进 total 会让界面显示成「5/6 成功」，用户以为有个号没领到（与签到同口径）。
@@ -2678,6 +2961,8 @@ async def run_daily_task_now(body: dict = Body(...),
                             detail='task 只能是 ' + ' / '.join(dailyplan.TASKS))
     ok, message = await dailyplan.run_task(task)
     plan = dailyplan.mark_ran(task)
+    # 任务可能覆盖多个分组（签到 / 领取 / 点亮），整体清缓存最稳（issue #444）。
+    accountcache.clear()
     return {'ok': ok, 'message': message, 'task': task, 'plan': plan}
 
 
@@ -2712,6 +2997,9 @@ async def account_clear_cooling(
         raise HTTPException(status_code=400, detail='该账号文件缺少 uid，无法定位上游状态')
 
     ok, message, detail = await wb2api.force_clear_account_cooling(uid)
+    if ok:
+        # 冷却 / 限流状态变了：列表缓存作废，否则界面还显示「冷却中」（issue #444）。
+        _invalidate_account_cache(group)
     return {'ok': ok, 'message': message, **(detail or {})}
 
 
@@ -2786,6 +3074,8 @@ async def account_force_cooling(
     ok, message, detail = await wb2api.force_set_account_cooling(uid, until_formatted, reason)
     if not ok:
         raise HTTPException(status_code=400, detail=message)
+    # 冷却状态变了：列表缓存作废（issue #444）。
+    _invalidate_account_cache(group)
     return {'ok': ok, 'message': message, 'until': until_formatted, **(detail or {})}
 
 
@@ -2806,9 +3096,9 @@ async def account_set_note(
 
     空串 = 删除备注（不留空行）。
     """
+    group = _group(upstream_id)
     try:
-        raw = wb2api.read_account_file_any(
-            filename, _require_dir(_group(upstream_id)))
+        raw = wb2api.read_account_file_any(filename, _require_dir(group))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail='账号文件不存在') from exc
     uid = str((raw.get('account') or {}).get('uid') or '').strip()
@@ -2826,6 +3116,8 @@ async def account_set_note(
         db.set_account_note(uid, note)
     else:
         db.delete_account_note(uid)
+    # 备注随列表一起下发，改了就要让缓存作废（issue #444）。
+    _invalidate_account_cache(group)
     return {'ok': True, 'uid': uid, 'note': note}
 
 
@@ -2849,6 +3141,7 @@ async def account_delete(filename: str, upstream_id: int | None = Query(None),
         raise HTTPException(status_code=404, detail='账号文件不存在')
     if uid:
         creditsvc.forget(uid)
+    _invalidate_account_cache(group)
     reload.request_restart(upstream=_reload_target(group))
     return {'success': True}
 
@@ -2924,6 +3217,9 @@ async def account_move(
     except Exception:  # noqa: BLE001 —— 读不出 uid 不影响移动，只是少了重载收尾
         uid = ''
     db.move_account_added(uid, src_dir, dst_dir)
+    # 源分组少一个、目标分组多一个：两份列表缓存都要作废（issue #444）。
+    _invalidate_account_cache(src)
+    _invalidate_account_cache(dst)
     reload.request_reload_or_restart(uid, upstream=_reload_target(dst))
     return {
         'ok': True,
@@ -2939,6 +3235,9 @@ async def restart(upstream_id: int | None = Query(None),
                   user: dict = Depends(security.require_session_admin)) -> dict:
     group = _group(upstream_id)
     ok, message = await reload.restart_now(upstream=_reload_target(group))
+    if ok:
+        # 重启后池状态会重建（加载失败的账号、冷却、在途等全是新的）。
+        _invalidate_account_cache(group)
     return {'ok': ok, 'message': message}
 
 
@@ -3037,6 +3336,7 @@ async def account_set_disabled(
                 uid, True, reason, base_url=group['base_url'],
                 api_key=upstreamsvc.forward_api_key(group))
             if ok:
+                _invalidate_account_cache(group)
                 return {
                     'ok': True,
                     'file': filename,
@@ -3050,6 +3350,8 @@ async def account_set_disabled(
             result = wb2api.set_account_disabled(filename, True, base_dir)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 改名属文件动作（`disabled_by_panel` 会出现在列表里），直接失效缓存。
+        _invalidate_account_cache(group)
         if result['changed'] and body.get('reload', True) is not False:
             reloaded = reload.request_restart(upstream=_reload_target(group))
     else:
@@ -3061,6 +3363,9 @@ async def account_set_disabled(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         renamed_back = bool(result['changed'])
+        # 改名回退路径改了 `disabled_by_panel`；状态位路径改了 `manual_disabled`。
+        # 两条都让列表缓存作废，后面所有返回分支共用这一处（issue #444）。
+        _invalidate_account_cache(group)
         if renamed_back and body.get('reload', True) is not False:
             reloaded = reload.request_restart(upstream=_reload_target(group))
         if uid:

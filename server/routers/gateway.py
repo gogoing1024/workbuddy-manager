@@ -599,7 +599,7 @@ def _account_expected_after_error(exc: Exception) -> bool:
     return not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, usage: dict | None = None, effort: str | None = None, account_expected: bool = True) -> None:
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, first_frame: int | None = None, usage: dict | None = None, effort: str | None = None, account_expected: bool = True) -> None:
     """记录调用日志与用量。
 
     credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
@@ -612,6 +612,13 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
 
     first_token 为首字延迟（毫秒）。None 表示未采集到：非流式请求本来就没有
     中间过程，历史记录也没这个值，因此同样用 NULL 存，而不是 0。
+
+    first_frame 为首帧延迟（毫秒）：上游**第一个带负载的 `data:` 帧**到达时刻，
+    不区分 role / 推理 / 正文，与上游 TTFB 同口径。为什么单独一列——first_token
+    要等到第一个含正文或推理的 delta，`effort=max` 下推理阶段很长时两者能差上
+    百秒（2026-11-26 实测：上游 TTFB 1.48s，面板首字 125s）。只记 first_token
+    会把「上游多久开始回话」读成「模型想了多久」，排查排队/建连问题时得出相反
+    结论。保活注释帧与 `data: [DONE]` 不算首帧，见 `_has_data_frame`。
 
     注意：日志/统计属于旁路，任何异常都不能影响用户请求本身
     （曾因统计函数缺失导致流式响应在收尾阶段中断，客户端看到
@@ -654,6 +661,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             completion_tokens=ct,
             latency_ms=latency,
             first_token_ms=first_token,
+            first_frame_ms=first_frame,
             ua=db._clean(ua, 512),
             error=db._clean(error, 500),
             stream=1 if stream else 0,
@@ -913,6 +921,36 @@ def _scan_sse(pending: str, usage: dict) -> tuple[str, bool]:
                 ):
                     saw_content = True
     return pending, saw_content
+
+
+# 首帧探测缓冲上限：正常 SSE 帧远小于它；异常上游持续发无换行大块时，
+# 超过就只保留尾部（见响应循环里的注释）。
+_FIRST_FRAME_BUF_MAX = 1 << 20
+
+
+def _has_data_frame(text: str) -> bool:
+    """这段文本里是否已经出现「带负载的 `data:` 帧」。
+
+    取帧口径与 `_scan_sse` 一致（按行切、只看 `data:` 行、跳过空 payload 与
+    `[DONE]`），区别是本函数不解析 JSON：首帧关心的是**到达时刻**，哪怕这一帧
+    只有 role 字段、甚至 JSON 还没拼完整，它确实已经到了。
+
+    为什么要排除保活与 `[DONE]`：
+
+      · SSE 注释帧（`: keepalive`）是上游在排队期间心跳用的，把第一行注释当成
+        「首帧」会让首帧延迟退化成建连延迟 —— 比 `first_token_ms` 还小，也和
+        上游 TTFB 不是一回事，面板上反而更难判断。
+      · `data: [DONE]` 只是流结束标记，不代表上游产出过任何内容；只在
+        「空流 / 只有结束标记」的请求里它才会单独出现，那种情况应当记 NULL。
+    """
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if not line.startswith('data:'):
+            continue
+        payload = line[5:].strip()
+        if payload and payload != '[DONE]':
+            return True
+    return False
 
 
 # ── 密钥自查用量（issue #137）─────────────────────────────
@@ -1484,10 +1522,61 @@ async def _chat(request: Request, upstream_path: str):
         # 首字延迟：只记一次，取「首个含正文的 delta」到达时刻。
         # 注意起点含建连 + 上游排队 + 模型开始思考，这正是「上游多久开始回话」。
         first_token_ms: int | None = None
+        # 首帧延迟：第一个**带负载的 `data:` 帧**到达时刻（不区分 role/推理/正文）。
+        # 与上面的首字分开记，见 `_record` 的注释。
+        first_frame_ms: int | None = None
+        # `aiter_bytes` 不保证按行/按帧切块，`data:` 可能被 chunk 边界切开，
+        # 所以留一段跨块残片再判定。判定成功后清空，不再累积；未成功时只保留
+        # 最后一行 —— 纯保活流会一直发 `: keepalive`，不能让缓冲无限长。
+        first_frame_buf = ''
+        # 内容空闲看门狗（issue #485）：按「距上一个**数据帧**」计时，保活帧
+        # （`: keepalive` 这类 SSE 注释）不续命。
+        #
+        # 为什么按数据帧而不是按「正文 delta」：长工具调用（例如生成一个大文件）
+        # 可能连续几分钟只有工具调用增量、没有正文；按正文判会把这类合法请求
+        # 误杀。任何 `data:` 事件都说明上游还在产出，只有纯保活才算空闲。
+        #
+        # 用 monotonic，避免系统时间被 NTP 回拨时把计时器直接跳过。
+        idle_limit = config.STREAM_IDLE_TIMEOUT
+        last_activity_at = time.monotonic()
         try:
             async for chunk in resp.aiter_bytes():
+                # 客户端已经走了就没必要继续占着上游连接与并发名额：断开上游、
+                # 结束生成器。`is_disconnected` 是非阻塞的，每块查一次成本可忽略。
+                if await request.is_disconnected():
+                    error_text = 'client disconnected'
+                    break
                 piece = chunk.decode('utf-8', errors='ignore')
                 raw_stream.feed(piece)
+                # 首帧打点：只记一次，且与下面的 `last_activity_at` 互不干扰
+                # （各自独立的变量，一个记「首次到达」，一个记「最近活跃」）。
+                # 顺序上放在活跃度判定之前：这一块若就是首帧，它的时刻要在
+                # 同一块内先落定，与看门狗是否续命无关。
+                if first_frame_ms is None:
+                    first_frame_buf += piece
+                    if _has_data_frame(first_frame_buf):
+                        first_frame_ms = int((time.time() - started) * 1000)
+                        first_frame_buf = ''
+                    elif '\n' in first_frame_buf:
+                        first_frame_buf = first_frame_buf.rsplit('\n', 1)[1]
+                    elif len(first_frame_buf) > _FIRST_FRAME_BUF_MAX:
+                        # 异常上游持续发无换行的大块：别让缓冲区无限增长，
+                        # 也别每块都全量重扫（O(n²)）。保留尾部仍有机会命中。
+                        first_frame_buf = first_frame_buf[-4096:]
+                if 'data:' in piece:
+                    last_activity_at = time.monotonic()
+                if idle_limit > 0 and time.monotonic() - last_activity_at > idle_limit:
+                    # 连接还活着、保活帧还在来，但正文/工具调用已经停了这么久。
+                    # 继续挂着只会一直占住上游并发名额，客户端那边也只会表现为
+                    # 「毫无响应」。
+                    #
+                    # 这里**只断开、不注入错误帧**：转发热路径必须原样透传上游
+                    # chunk（`test_gateway_source_does_not_rewrite_sse` 守着这条），
+                    # 网关自己构造 SSE 帧会引入重编码与兼容风险。截断由客户端按
+                    # 「流未正常结束」处理，原因写进 request_logs.error。
+                    error_text = ('upstream idle for %ds without content'
+                                  % idle_limit)
+                    break
                 if status_code >= 400:
                     pending += piece
                     # 有数据就留一份：早先要等到 4000 字节才取，而上游的错误体
@@ -1512,7 +1601,7 @@ async def _chat(request: Request, upstream_path: str):
             _record(
                 key, ip, requested_model or '', mapped or '', status_code, pt, ct,
                 latency, ua, error_text, True, usage=usage,
-                first_token=first_token_ms, effort=effort,
+                first_token=first_token_ms, first_frame=first_frame_ms, effort=effort,
             )
             tap_svc.capture(
                 body=client_body, headers=request.headers.items(), key=key, ua=ua,

@@ -29,6 +29,8 @@ import type {
   CreatedRedPacket,
   CreditExpiry,
   CreditsMeta,
+  DatabaseCompactResult,
+  DatabaseStatus,
   DrawResult,
   AccountBackfillInfo,
   AutoUpdateConfig,
@@ -192,16 +194,21 @@ const groupQs = (upstreamId?: number | null): string =>
   upstreamId == null ? '' : `?upstream_id=${encodeURIComponent(String(upstreamId))}`;
 
 export interface AccountRiskEvent {
-  id: string; uid: string; nickname: string; group: string; realm: string;
+  id: string; uid: string; nickname: string; note?: string; group: string; realm: string;
   operation: string; http_status: number; ts: number; historical: boolean;
   acknowledged: boolean; paused: boolean | null; action_error: string;
   pause_until: number; needs_review: boolean; failures: number;
+  detail?: string; detail_cn?: string;
+  /** `info` = 一键执行等低频任务 5xx，仪表盘默认不展示；账号页仍保留。 */
+  severity?: 'critical' | 'warning' | 'info';
 }
 
 export const accountRiskApi = {
-  list: (realm: string, upstreamId: number | null = null, allGroups = false, includeAcknowledged = false) =>
+  list: (realm: string, upstreamId: number | null = null, allGroups = false, includeAcknowledged = false,
+         activeOnly = false) =>
     get<{items: AccountRiskEvent[]; failed_groups: string[]; total: number}>('/api/account-risk',
-      {realm, upstream_id: upstreamId ?? undefined, all_groups: allGroups, include_acknowledged: includeAcknowledged}),
+      {realm, upstream_id: upstreamId ?? undefined, all_groups: allGroups,
+       include_acknowledged: includeAcknowledged, active_only: activeOnly}),
   resume: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/resume`),
   acknowledge: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/acknowledge`),
 };
@@ -244,6 +251,20 @@ export const accountApi = {
   setWeight: (filename: string, weight: number, upstreamId?: number | null) =>
     put<{ok: boolean; weight: number; reload_triggered: boolean}>(
       `/api/accounts/${encodeURIComponent(filename)}/weight` + groupQs(upstreamId), {weight}),
+  /**
+   * 设置 / 清除账号级「不参与定时任务」（issue #437）。
+   *
+   * 写的是上游 auth 文件顶层 `skip_tasks`（不是本端库）：任务挑选发生在上游，
+   * 它必须能读到。`true` 只是让定时任务跳过该账号，**转发不受影响**——
+   * 与「临时停用」把账号摘出池子是两回事。
+   *
+   * 走 POST body 而不是 query：`enabled` 是布尔值，放 query 容易出现字符串
+   * "false" 被当成真值的静默错绑（见 server/tests/test_request_binding.py）。
+   */
+  setSkipTasks: (file: string, enabled: boolean, upstreamId?: number | null) =>
+    post<{ok: boolean; file: string; uid: string; skip_tasks: boolean;
+          changed: boolean; reload_triggered: boolean}>(
+      '/api/accounts/skip-tasks', {file, enabled, upstream_id: upstreamId ?? undefined}),
   /**
    * 某分组的账号列表。upstreamId 省略 / null = 默认分组。
    *
@@ -394,6 +415,8 @@ export const accountApi = {
       already: number;
       /** 不适用的账号数（国际版没有签到体系）。它既不算成功也不算失败 */
       skipped: number;
+      /** 已设置「不参与定时任务」而跳过的账号数（issue #437，单列） */
+      skip_tasks: number;
       results: {
         nickname: string; ok: boolean; message: string;
         code?: number; skipped?: boolean; already?: boolean;
@@ -994,4 +1017,15 @@ export const pgSyncApi = {
   importData: () =>
     post<{ok: boolean; message: string; status: PgSyncStatus}>('/api/settings/pg-sync/import'),
   status: () => get<PgSyncStatus>('/api/settings/pg-sync/status'),
+};
+
+/* ── 数据库维护（issue #492 第二步）────────────────────── */
+export const maintenanceApi = {
+  database: () => get<DatabaseStatus>('/api/maintenance/database'),
+  /**
+   * 压缩数据库。3GB 级别的库在机械盘上可能要一两分钟，远超默认 60s 超时；
+   * 后端只在替换完成（或明确失败）后返回，所以这里单独放宽。
+   */
+  compact: async () => (await http.post<DatabaseCompactResult>(
+    '/api/maintenance/database/compact', {}, {timeout: 600000})).data,
 };

@@ -10,7 +10,7 @@
   `deploy/check-upstream.sh` 只提示这一点并以 0 退出；需要验证的是补丁与
   Go 测试，不是 git 提交。
 - **源码从哪来**：维护者手上留存了一份**最后版本的源码归档**（HEAD 快照，
-  287 个文件，含 `LICENSE`）。它是完整的、可构建的；但原克隆是 blob-less
+  351 个文件，含 `LICENSE`）。它是完整的、可构建的；但原克隆是 blob-less
   部分克隆，**逐版本历史无法完整还原**，所以归档以「单次导入提交」的形式保存，
   不能 checkout 出中间某次提交的源码。
 - **源码怎么到达用户**（**不要**把上游代码提交进本仓库，也不要另开公开镜像）：
@@ -21,8 +21,8 @@
   3. `gh release upload upstream-src /tmp/upstream-pack/workbuddy2api-src.tar.gz --clobber`
      —— 覆盖到**固定的载体 Release**（tag `upstream-src`，**必须是 pre-release**：
      否则它会成为 `releases/latest`，把面板的更新检查带偏）；
-  4. 之后任何一次面板发版，CI 都会把它塞进发布包的 `upstream/`（取不到只告警、不
-     阻断发布），用户装/更新时就用它。
+  4. 之后任何一次面板发版，CI 都会把它塞进发布包的 `upstream/`（取不到会直接
+     让发布失败，不再产出不含上游的包），用户装/更新时就用它。
 - **改动上游代码**：改本地那份源码（`/opt/workbuddy2api`），
   然后 `docker compose up -d --build`。改的是别人的 MIT 代码，需保留其
   `LICENSE` 与版权声明。
@@ -56,7 +56,7 @@
 
 **CI 的发布门禁**（2.2.1 起）：发布作业会把随包上游当成一次真实构建来验 ——
 `apply_upstream_patches.py` 必须报「补丁数 = 文件数，且没有现场新应用的」，
-然后 `go build ./...`、`go test ./...`、对**补丁动过的文件**跑 `gofmt -l`，
+然后 `go build ./...`、`go test ./...`、对**补丁新增的 Go 文件**跑 `gofmt -l`，
 并校验 `server/main.py` 的 `version=` 与 tag 一致。以前只跑 Python 测试，
 上游补丁的缺陷可以一路进 Release。
 
@@ -204,18 +204,11 @@ bash deploy/verify-release.sh /tmp/vX.Y.Z/workbuddy-manager-vX.Y.Z.tar.gz
 tar tzf /tmp/vX.Y.Z/workbuddy-manager-vX.Y.Z.tar.gz | head -5      # 抽查包结构
 #    再解开看 .version 与 server/main.py 的版本号
 
-# 5) 给旧版更新器补过渡签名（v1.0.85 及更早仍强制验签；私钥只在维护者本机）
-cd /tmp/vX.Y.Z
-ssh-keygen -Y sign -f ~/.ssh/workbuddy-release -n file workbuddy-manager-vX.Y.Z.tar.gz
-gh release upload vX.Y.Z workbuddy-manager-vX.Y.Z.tar.gz.sig \
-  --repo ithtelab/workbuddy-manager
-#    验一下再继续（用仓库里记录的公钥，或 update.py 里内嵌的那把）：
-#    printf 'release %s\n' "$(cat ~/.ssh/workbuddy-release.pub)" > allowed_signers
-#    ssh-keygen -Y verify -f allowed_signers -I release -n file \
-#      -s workbuddy-manager-vX.Y.Z.tar.gz.sig < workbuddy-manager-vX.Y.Z.tar.gz
-
-# 6) 核对无误后**发布**（草稿对用户不可见，这一步才让版本生效）
+# 5) 核对无误后**发布**（草稿对用户不可见，这一步才让版本生效）
 gh release edit vX.Y.Z --repo ithtelab/workbuddy-manager --draft=false
+#    发布后 Publish Images 工作流会自动把 staging-<版本> 镜像提升为
+#    :<版本> 与 :latest；在这之前用户拉不到本次镜像。
+#    只适用于 v1.0.86+：更早的更新器仍强制要求 .sig，需手动下载安装一次。
 ```
 
 关键的一条：**草稿不发布，用户永远看不到这个版本** —— 面板与更新器的版本检查都读
@@ -224,9 +217,9 @@ gh release edit vX.Y.Z --repo ithtelab/workbuddy-manager --draft=false
 用户侧看到的一直是上一个**已发布且产物齐全**的版本。
 
 2026-10-14 起**新版本更新器不再要求签名**：只核对发布页给的 sha256 与文件大小
-（发布说明里就印着那个哈希，工作流自动附上）。但 `.sig` 仍要按第 5 步手工补 ——
-停在 v1.0.85 及更早的更新器强制验签，漏掉就会让这批老部署无法升级。为什么这样
-过渡、私钥如何保管，见 [release-signing.md](release-signing.md)。
+（发布说明里就印着那个哈希，工作流自动附上）。发版流程也**不再生成或上传 `.sig`**。
+停在 v1.0.85 及更早的更新器仍强制验签，这批老部署需要手动下载安装一次才能接上
+新链路；取舍与信任边界见 [release-signing.md](release-signing.md)。
 
 ## 发布包字节的可复现性
 

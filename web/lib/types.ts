@@ -20,6 +20,15 @@ export interface Account {
    * 写在上游 auth 文件顶层 `weight` 里 —— 上游刷新 token 时会保留它。
    */
   weight?: number;
+  /**
+   * 账号级「不参与定时任务」（issue #437）：写在上游 auth 文件顶层 `skip_tasks`。
+   *
+   * true = 账号**仍在号池里、照常参与转发**，但上游调度器的签到 / 保活 / 旅行 /
+   * 活跃 / 开学季 / 夜猫子等任务逐号跳过它。与「临时停用」不同：后者会把账号
+   * 摘出池子、连转发一起停掉。企业账号不支持签到（400/10001），用这个开关既
+   * 不退池、也不再让任务白打上游。
+   */
+  skip_tasks?: boolean;
   /** 该令牌签发的总时长（秒）；后端从 JWT 解出，解不出为 null */
   ttl_seconds?: number | null;
   /** 令牌签发时间（秒）≈ 最近一次刷新时间；后端从 JWT iat 解出，解不出为 null */
@@ -102,6 +111,13 @@ export interface Account {
   poolUnknown?: boolean;
   /** 已知上游不会加载该文件时的原因（空 = 未发现明显问题） */
   invalid_reason?: string;
+  /**
+   * 登录态被上游作废（billing 连续返回 401，issue #490）。
+   *
+   * 为 true 时后端已把 `credits` 置空（旧快照会误导），界面应显示「需重登」
+   * 而不是一个看起来正常的余额。重新登录成功或任意一次积分查询成功后自动清除。
+   */
+  needs_relogin?: boolean;
   /**
    * 本面板**主动临时停用**（issue #21）——文件名带 `.disabled` 后缀，
    * 上游的 `workbuddy*.json` glob 因此不再匹配它、不加载该账号。
@@ -691,6 +707,17 @@ export interface RequestLog {
    * 反映不出上游响应快慢；首字延迟才是「上游多久开始回话」。
    */
   first_token_ms: number | null;
+  /**
+   * 首帧延迟（毫秒，issue #493）：从发起上游请求到收到第一个**带负载的
+   * `data:` 帧**。不区分 role / 推理 / 正文，与上游 TTFB 同口径。
+   * null = 未采集（非流式请求、只有保活帧与 [DONE] 的空流、或升级前的旧记录）。
+   *
+   * 与 first_token_ms 并存的原因：后者要等到首个含正文或推理的 delta，
+   * `effort=max` 推理阶段很长时两者能差上百秒。判断「建连/排队快慢」只能看
+   * 这一列，否则会把「模型想了多久」误读成「上游多久开始回话」。
+   * 注意 0 是合法值（同一秒内就回帧），判断缺失必须用 `!= null`。
+   */
+  first_frame_ms: number | null;
   /**
    * 提示词缓存的三段 token（issue #69）：上游（腾讯）在流式末帧 usage 里给。
    * **null = 上游没给这三个字段**（老上游），与「给了 0」不是一回事——
@@ -1746,6 +1773,49 @@ export interface PgSyncTestResult {
   ok: boolean;
   message: string;
   server_version?: string;
+}
+
+/* ── 数据库维护（设置 → 数据备份，issue #492 第二步）──── */
+
+/** 服务端固定统计的几张主要表；不存在时后端返回 0。 */
+export interface DatabaseTableCounts {
+  request_logs: number;
+  tap_turns: number;
+  checkin_logs: number;
+  account_risk_events: number;
+  task_logs: number;
+}
+
+/**
+ * 最近一次维护结果。`kind='prune'` 是周期清理，`kind='compact'` 是手动压缩；
+ * `ok=false` 时带 `error`（原库未被替换）。
+ */
+export interface DatabaseMaintenanceLast {
+  kind: 'prune' | 'compact' | string;
+  at: number;
+  ok: boolean;
+  before_bytes?: number;
+  after_bytes?: number;
+  saved_bytes?: number;
+  duration_ms?: number;
+  removed?: number;
+  error?: string;
+}
+
+export interface DatabaseStatus {
+  db_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  tables: DatabaseTableCounts;
+  last: DatabaseMaintenanceLast | null;
+}
+
+export interface DatabaseCompactResult {
+  ok: boolean;
+  before_bytes: number;
+  after_bytes: number;
+  saved_bytes: number;
+  duration_ms: number;
 }
 
 /* ── 页面监控（watchdog）──────────────────────────────── */

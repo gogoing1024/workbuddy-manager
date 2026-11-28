@@ -27,6 +27,7 @@ import {
   Sparkles,
   StickyNote,
   Scale,
+  ListX,
   FolderInput,
   TriangleAlert,
   ScanSearch,
@@ -65,6 +66,12 @@ import {
   type SortKey,
   type SortDirection,
 } from '@/lib/account-list';
+import {
+  getAccountsSort,
+  getAccountsSortDirection,
+  setAccountsSort,
+  setAccountsSortDirection,
+} from '@/lib/display-prefs';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -83,6 +90,7 @@ import {AccountModelLimitsDialog} from '@/components/common/accounts/AccountMode
 import {AccountTaskDialog} from '@/components/common/accounts/AccountTaskDialog';
 import {ReloginQueueDialog} from '@/components/common/accounts/ReloginQueue';
 import {ModelProbeDialog} from '@/components/common/accounts/ModelProbeDialog';
+import {AccountRiskWarnings} from '@/components/common/accounts/AccountRiskWarnings';
 import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -109,11 +117,25 @@ import {Tooltip, TooltipContent, TooltipTrigger} from '@/components/ui/tooltip';
 /**
  * 一页显示多少个账号。
  *
- * 账号一多（几十个）整张表会把页面撑得很长，翻页比无限滚动更适合「我要找某一个号」
- * 的场景；页码条同时给出「共 N 个」，不会让人以为剩下的号不见了。
+ * 账号一多（几十个）整张表会把页面撑得很长，翻页比无限滚动更适合「我要找某一个号」的
+ * 场景；页码条同时给出「共 N 个」，不会让人以为剩下的号不见了。
  * **只有超过一页时才渲染页码条**，小池子看不到多余的控件。
+ *
+ * 20 是历史默认值，保留成「页面刚打开时的样子」——老部署升级后列表长度不变。
+ * 更大的值给「一眼扫完整个池子」的场景（50 个号时 20/页要翻三页）。
+ * 选中的值写 localStorage：它是**阅读偏好**而不是查询条件，刷新后不该复位。
  */
-const PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [20, 25, 50, 100] as const;
+type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
+const DEFAULT_PAGE_SIZE: PageSize = PAGE_SIZE_OPTIONS[0];
+const PAGE_SIZE_STORAGE_KEY = 'wb.accounts.page-size';
+
+/**
+ * localStorage 里可能是任意脏数据（手改过、旧版本写的），必须过白名单才敢用：
+ * 直接 `Number()` 一个 `"abc"` 会得到 NaN，`paginate` 拿 NaN 算页数会整页空掉。
+ */
+const isPageSize = (v: unknown): v is PageSize =>
+  PAGE_SIZE_OPTIONS.includes(v as PageSize);
 
 /**
  * 账号 → 4 组展示语义。
@@ -174,6 +196,17 @@ export default function AccountsPage() {
   const [sort, setSort] = useState<SortKey>('default');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   /**
+   * 排序档位与升降序记在浏览器本地：刷新 / 重开浏览器保持最后的选择。
+   *
+   * 首帧固定按默认值渲染，挂载后再读偏好回填——服务端预渲染读不到
+   * localStorage，首帧就读会产生 hydration 不一致（仪表盘图表类型同款处理，
+   * 偏好本体见 lib/display-prefs.ts）。
+   */
+  useEffect(() => {
+    setSort(getAccountsSort());
+    setSortDirection(getAccountsSortDirection());
+  }, []);
+  /**
    * 自定义顺序（拖拽排序）：uid 数组，存在**服务端**（server/services/accountorder.py）。
    *
    * 为什么不做浏览器本地存储：顺序是这份部署的共享视图 —— 同一个面板可能有多人
@@ -184,6 +217,13 @@ export default function AccountsPage() {
   /** 正在被拖动的账号 uid；null = 没在拖（行上据此出高亮） */
   const [draggingUid, setDraggingUid] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  /**
+   * 每页显示多少个账号。
+   *
+   * 首帧用默认值、挂载后再读偏好：服务端预渲染读不到 localStorage，直接读会让
+   * SSR 与客户端首帧不一致（同 layout 里那几处偏好的处理）。
+   */
+  const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   /**
    * 账号分组（多账号池）：一个分组 = 一套上游实例（账号池）。
    * null = 默认分组（升级前那套，行为逐字不变）；其余 = 上游记录的 id。
@@ -404,6 +444,7 @@ export default function AccountsPage() {
       //   already — 今天已经签过，本次没再打上游（这正是「不重复签到」的效果）
       const notes = [
         r.skipped > 0 ? t('accounts.checkinSkippedNote', {skipped: r.skipped}) : '',
+        r.skip_tasks > 0 ? t('accounts.checkinSkipTasksNote', {n: r.skip_tasks}) : '',
         r.already > 0 ? t('accounts.checkinAlreadyNote', {n: r.already}) : '',
       ].filter(Boolean).join(' ');
       const note = notes ? ' ' + notes : '';
@@ -511,7 +552,30 @@ export default function AccountsPage() {
     [visible, q, statusGroup, sort, sortDirection, liveCredits, manualOrder],
   );
 
-  const paged = useMemo(() => paginate(filtered, page, PAGE_SIZE), [filtered, page]);
+  /**
+   * 读回「每页多少个」偏好。读不到 / 值不合法就保持默认。
+   * 依赖为空：这是**挂载时读一次**的阅读偏好，不随筛选或分页变化。
+   */
+  useEffect(() => {
+    try {
+      const raw = Number(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY));
+      if (isPageSize(raw)) setPageSize(raw);
+    } catch { /* 隐私模式 / 被禁用：按默认走，不影响其它功能 */ }
+  }, []);
+
+  /** 切换每页条数：页码归位到第 1 页 —— 第 N 页在新页大小下已不是同一批账号了。 */
+  const changePageSize = useCallback((next: PageSize) => {
+    setPageSize(next);
+    setPage(1);
+    try {
+      window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(next));
+    } catch { /* 写不进去只影响下次打开时的默认值 */ }
+  }, []);
+
+  const paged = useMemo(
+    () => paginate(filtered, page, pageSize),
+    [filtered, page, pageSize],
+  );
 
   /**
    * 页码越界时在**渲染期**夹回来（删掉一个账号、或改筛选让条数变少就会越界）。
@@ -621,7 +685,9 @@ export default function AccountsPage() {
       timer: window.setTimeout(() => {
         dragPressRef.current = null;
         dragStartOrderRef.current = manualOrderRef.current;
-        // 别的排序档位下松手会被立刻覆盖回去，所以拖动前先切到自定义顺序
+        // 别的排序档位下松手会被立刻覆盖回去，所以拖动前先切到自定义顺序。
+        // 这是系统替用户做的临时切换，不写本地偏好——拖一下不该改掉用户
+        // 自己选的默认视图（见 display-prefs.ts 的说明，测试有断言钉住）。
         setSort('manual');
         setDraggingUid(a.uid);
       }, 320),
@@ -633,12 +699,35 @@ export default function AccountsPage() {
   const noAccountsInRealm = !noAccountsAtAll && visible.length === 0;
   const noMatch = visible.length > 0 && filtered.length === 0;
 
-  /** 清掉列表自己的筛选（不动分组，也不动版本） */
+  /**
+   * 换排序档位：状态与本地偏好一起写，刷新后保持。
+   * `added` 档默认降序（新加的在前），换档时一并复位方向。
+   */
+  function chooseSort(v: SortKey) {
+    const dir: SortDirection = v === 'added' ? 'desc' : 'asc';
+    setSort(v);
+    setSortDirection(dir);
+    setPage(1);
+    setAccountsSort(v);
+    setAccountsSortDirection(dir);
+  }
+
+  /** 翻转升降序：同样写回本地偏好。 */
+  function toggleSortDirection() {
+    const next: SortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    setSortDirection(next);
+    setAccountsSortDirection(next);
+    setPage(1);
+  }
+
+  /** 清掉列表自己的筛选（不动分组，也不动版本）；排序档位一并复位回默认（偏好同步落盘） */
   function clearListFilters() {
     setQ('');
     setStatusGroup('all');
     setSort('default');
     setSortDirection('asc');
+    setAccountsSort('default');
+    setAccountsSortDirection('asc');
     setPage(1);
   }
 
@@ -838,6 +927,19 @@ export default function AccountsPage() {
         </Badge>
       );
     }
+    if (tier === 'needsRelogin') {
+      // 登录态被上游作废（billing 连续 401）。这是**能直接修**的状态：
+      // 重新扫码即可。用玫红而不是中性灰——它确实需要用户动手。
+      return (
+        <Badge
+          variant="secondary"
+          className="rounded-full text-rose-600 dark:text-rose-400"
+          title={t('accounts.badgeNeedsReloginTitle')}
+        >
+          {label}
+        </Badge>
+      );
+    }
     if (tier === 'riskPaused') {
       return <Badge variant="outline" className="rounded-full text-amber-600" title={t('risk.recovery')}>{label}</Badge>;
     }
@@ -962,6 +1064,25 @@ export default function AccountsPage() {
     );
   }
 
+  /** 账号级「不参与定时任务」（issue #437）徽章。
+   *
+   *  语义容易被误解成「停用」，所以文案必须写明**转发不受影响**：它只让签到 /
+   *  保活 / 旅行 / 活跃 / 开学季 / 夜猫等任务跳过这个号，账号仍在号池里照常
+   *  被选号。企业账号不支持签到（上游恒 400/10001），这是不退池的静音开关。 */
+  function renderSkipTasksBadge(a: Account) {
+    if (a.skip_tasks !== true) return null;
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 rounded-full border-muted-foreground/30 px-1.5 py-0 text-[10px] font-normal text-muted-foreground"
+        title={t('accounts.skipTasksBadgeTitle')}
+      >
+        <ListX className="mr-0.5 h-3 w-3" />
+        {t('accounts.skipTasksBadge')}
+      </Badge>
+    );
+  }
+
   /** 模型详情按需展开，避免长模型名或大量受限模型撑高账号行。 */
   function renderModelLimit(a: Account) {
     const limited = rateLimitedModels(a);
@@ -992,16 +1113,32 @@ export default function AccountsPage() {
    *  「确实没积分」，不该报警。
    */
   function renderCredits(a: Account) {
+    // 「需重登」优先于任何余额：实时值可能是失效前查到的旧数，单账号刷新失败
+    // 时也不会被删掉；继续展示数字会让人以为账号还能用（2026-11-28 审查）。
+    if (a.needs_relogin) {
+      return (
+        <span
+          className="text-xs text-rose-600 dark:text-rose-400"
+          title={t('accounts.badgeNeedsReloginTitle')}
+        >
+          {t('accounts.badgeNeedsRelogin')}
+        </span>
+      );
+    }
     // 优先用刚查到的实时值，其次上游 /status 的快照值
     const live = liveCredits[a.uid];
     const value = live ?? a.credits;
     if (value === null || value === undefined) {
+      // 登录态失效时余额本来就不可信：别用「上游尚未返回积分」那套说法，
+      // 它会把人引向「上游不可达」，而真正要做的动作是重新登录。
       return (
         <span
-          className="text-xs text-muted-foreground"
-          title={t('accounts.creditsNoneTitle')}
+          className={`text-xs ${a.needs_relogin ? 'text-rose-600 dark:text-rose-400' : 'text-muted-foreground'}`}
+          title={a.needs_relogin
+            ? t('accounts.badgeNeedsReloginTitle')
+            : t('accounts.creditsNoneTitle')}
         >
-          —
+          {a.needs_relogin ? t('accounts.badgeNeedsRelogin') : '—'}
         </span>
       );
     }
@@ -1203,6 +1340,27 @@ export default function AccountsPage() {
           <Scale
             className={
               'h-3.5 w-3.5 ' + (a.weight ? 'text-primary' : '')
+            }
+          />
+        </Button>
+        {/* 不参与定时任务（issue #437）：只停任务、不退池。企业账号不支持签到
+            （上游恒 400/10001），「临时停用」会把转发一起停掉，这个开关才是
+            「保留转发、静音任务」的那一档。写的是上游 auth 文件，改完重载生效。 */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 rounded-md"
+          title={a.skip_tasks ? t('accounts.skipTasksDisable') : t('accounts.skipTasksEnable')}
+          disabled={busy}
+          onClick={() => run(
+            a.file,
+            () => accountApi.setSkipTasks(a.file, a.skip_tasks !== true, groupId),
+            a.skip_tasks ? t('accounts.skipTasksSavedOff') : t('accounts.skipTasksSavedOn'),
+          )}
+        >
+          <ListX
+            className={
+              'h-3.5 w-3.5 ' + (a.skip_tasks ? 'text-primary' : '')
             }
           />
         </Button>
@@ -1535,6 +1693,7 @@ export default function AccountsPage() {
           从右边跳到左边，看起来像按钮错位（issue #337）。
           本页没有早返回的整页守卫（取不到账号时只在下面给错误态）。 */}
       <PageSectionTabs />
+      <AccountRiskWarnings upstreamId={groupId} activeOnly />
 
       <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -1673,11 +1832,9 @@ export default function AccountsPage() {
                 </Button>
               ))}
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
               <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
-              <Select value={sort} onValueChange={(v) => {
-                setSort(v as SortKey); setSortDirection(v === 'added' ? 'desc' : 'asc'); setPage(1);
-              }}>
+              <Select value={sort} onValueChange={(v) => chooseSort(v as SortKey)}>
                 <SelectTrigger className="h-9 w-[150px] bg-background" aria-label={t('accounts.sortLabel')}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">{t('accounts.sortDefault')}</SelectItem>
@@ -1690,11 +1847,27 @@ export default function AccountsPage() {
               {sort !== 'default' && sort !== 'manual' && (
                 <Button variant="outline" size="sm" className="h-9 gap-1.5"
                   aria-label={t('accounts.sortDirectionToggle', {direction: t(sortDirection === 'asc' ? 'accounts.sortAscending' : 'accounts.sortDescending')})}
-                  onClick={() => { setSortDirection(d => d === 'asc' ? 'desc' : 'asc'); setPage(1); }}>
+                  onClick={toggleSortDirection}>
                   {sortDirection === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />}
                   {t(sortDirection === 'asc' ? 'accounts.sortAscending' : 'accounts.sortDescending')}
                 </Button>
               )}
+              {/* 每页条数：常驻在选择器里（不是只在多页时出现）——
+                  账号少于一页时同样要能改，否则「改成 100」之后就没法改回来了。 */}
+              <span className="flex shrink-0 items-center gap-1 pl-0.5 text-[11px] text-muted-foreground">
+                {t('accounts.pageSize')}
+              </span>
+              <Select value={String(pageSize)}
+                onValueChange={(v) => changePageSize(Number(v) as PageSize)}>
+                <SelectTrigger className="h-9 w-[92px] bg-background" aria-label={t('accounts.pageSizeAria')}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PAGE_SIZE_OPTIONS.map((n) => (
+                    <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           {sort === 'added' && <p className="mt-2 text-xs text-muted-foreground">{t('accounts.sortAddedHint')}</p>}
@@ -1728,6 +1901,7 @@ export default function AccountsPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {renderSkipTasksBadge(a)}
                   {renderStatus(a)}
                   {renderModelLimit(a)}
                 </div>
@@ -1811,6 +1985,7 @@ export default function AccountsPage() {
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap items-center gap-1.5">
+                    {renderSkipTasksBadge(a)}
                     {renderStatus(a)}
                   </div>
                   {/* 模型限流/缺模的提示放在状态**下面**另起一行：原先它与状态徽章

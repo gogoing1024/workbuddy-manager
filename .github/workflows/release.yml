@@ -34,6 +34,12 @@ permissions:
   # （实测报错：denied: installation not allowed to Create organization package）。
   packages: write
 
+# 同一 tag 只允许一个发版作业在跑：并发重跑会互相覆盖 Release 资产与
+# `:latest`/版本镜像 tag（2026-11-28 审查 H3）。不取消进行中的那一次。
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -169,6 +175,9 @@ jobs:
           echo "${TAG}" > "$STAGE/.version"
           # 不含运行时数据与凭据
           find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+          # 测试可能留下 device token 临时目录（test_outbound_alignment 会写
+          # server/tests/_dt_tmp）；发布包不能带任何测试残留（2026-11-28 审查 M2）。
+          rm -rf "$STAGE/server/tests/_dt_tmp" "$STAGE/server/.pytest_cache" 2>/dev/null || true
           echo "stage=$STAGE" >> $GITHUB_OUTPUT
           # ── 可复现打包 ─────────────────────────────────────────────
           # 发布说明把 sha256 当作对用户的承诺。普通 `tar czf` 会把文件的
@@ -236,6 +245,27 @@ jobs:
             echo "::error::随包上游的补丁数不符：已应用 $GOT / 共 $N"
             exit 1
           fi
+          # 数量相同还不够：资产可能多带一个仓库已删除的旧补丁，或 manifest
+          # 声称的哈希与仓库补丁字节不一致。逐条比对键集合与 sha256
+          # （2026-11-28 审查 H5）。
+          python3 - "$TMP" <<'PY'
+          import glob, hashlib, json, os, sys
+          src = sys.argv[1]
+          with open(os.path.join(src, '.wb2a-patches.json'), encoding='utf-8') as fh:
+              manifest = json.load(fh)
+          want = {}
+          for path in glob.glob('dev/upstream-patches/*.patch'):
+              with open(path, 'rb') as fh:
+                  want[os.path.basename(path)] = hashlib.sha256(fh.read()).hexdigest()
+          extra = sorted(set(manifest) - set(want))
+          missing = sorted(set(want) - set(manifest))
+          if extra or missing:
+              raise SystemExit(f'manifest 与仓库补丁集合不一致：extra={extra} missing={missing}')
+          bad = [k for k, v in want.items() if manifest.get(k) != v]
+          if bad:
+              raise SystemExit(f'manifest 哈希与仓库补丁不一致：{bad}')
+          print(f'manifest 与仓库补丁逐条一致（{len(want)} 条）')
+          PY
 
           ( cd "$TMP" && go build ./... )
           ( cd "$TMP" && go test ./... )
@@ -331,8 +361,11 @@ jobs:
           STAGE="${{ steps.pack.outputs.stage }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = "true" ]; then
-              echo "Release $TAG 还是草稿，覆盖产物"
+              echo "Release $TAG 还是草稿，覆盖产物并同步发布说明"
               gh release upload "$TAG" "${STAGE}.tar.gz" "${STAGE}.zip" --clobber
+              # 产物重建后字节/摘要都变了：发布说明里印的 sha256 与 upstream-id
+              # 必须同步刷新，否则用户手核对必然失败（2026-11-28 审查 H4）。
+              gh release edit "$TAG" --notes-file RELEASE_NOTES.md
             else
               # **已发布的 Release 绝不覆盖产物**：发布说明里印着 sha256，用户侧的
               # 更新器就是拿它核对的 —— 换掉字节流等于让所有人的更新校验失败
@@ -379,6 +412,10 @@ jobs:
         run: |
           IMAGE="ghcr.io/${{ github.repository_owner }}/workbuddy-manager"
           echo "name=${IMAGE,,}" >> $GITHUB_OUTPUT
+          # 上游镜像名也给一份（全小写）：has_upstream=0 时后面的“解析上游镜像名”
+          # 步骤会被跳过，但管理端构建仍需要这个名字拼 fallback。
+          UPSTREAM="ghcr.io/${{ github.repository_owner }}/workbuddy2api"
+          echo "upstream_name=${UPSTREAM,,}" >> $GITHUB_OUTPUT
 
       # 下面这几步与镜像构建同属「附属产物」链路，一并加 continue-on-error：
       # 它们任一失败都会让 build-push-action 无法运行，若不加，job 会标红——
@@ -421,9 +458,12 @@ jobs:
           context: ${{ steps.pack.outputs.stage }}/upstream
           platforms: linux/amd64,linux/arm64
           push: true
+          # 只推 staging/sha：版本号与 latest 由 publish-images.yml 在 Release
+          # **正式发布后**提升，避免草稿核对前用户就拉到未验收的镜像
+          # （2026-11-28 审查 H3）。
           tags: |
-            ${{ steps.upstream_image.outputs.name }}:${{ steps.vars.outputs.version }}
-            ${{ steps.upstream_image.outputs.name }}:latest
+            ${{ steps.upstream_image.outputs.name }}:staging-${{ steps.vars.outputs.version }}
+            ${{ steps.upstream_image.outputs.name }}:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.version=${{ steps.vars.outputs.version }}
             dev.workbuddy.upstream-id=${{ steps.pack.outputs.upstream_id }}
@@ -450,19 +490,20 @@ jobs:
           push: true
           # 管理端镜像在构建期会从**上游镜像**里取一份任务脚本与配置模板
           # （见 Dockerfile 的 `FROM ${UPSTREAM_IMAGE} AS upstream`）。
-          # 必须显式钉到**本次发布的版本**：不传的话 Dockerfile 的默认值是
-          # `:latest`，而 latest 此刻还指着上一版 —— 内置脚本就会滞后一个版本，
-          # 与「随包上游同版本」的承诺不符。
+          # 必须显式钉到**本次构建的上游 staging 镜像**（`staging-<版本>`）：
+          # 不传的话 Dockerfile 的默认值是 `:latest`，而 latest 此刻还指着上一版
+          # —— 内置脚本就会滞后一个版本，与「随包上游同版本」的承诺不符。
           #
           # 因此上游镜像的构建被挪到了本步骤**之前**；若上游构建失败/被跳过
           # （has_upstream=0），这里回落到 latest —— 那种情况下发布包本身也不含
           # upstream/，管理端镜像里的内置脚本只是尽力而为。
           build-args: |
-            UPSTREAM_IMAGE=ghcr.io/${{ github.repository_owner }}/workbuddy2api:${{ steps.build_upstream.outcome == 'success' && steps.vars.outputs.version || 'latest' }}
-          # 镜像标签用小写（GHCR 要求），去掉 v 前缀
+            UPSTREAM_IMAGE=${{ steps.build_upstream.outcome == 'success' && format('{0}:staging-{1}', steps.image.outputs.upstream_name, steps.vars.outputs.version) || format('{0}:latest', steps.image.outputs.upstream_name) }}
+          # 只推 staging/sha；版本号与 latest 由 publish-images.yml 在 Release
+          # 正式发布后提升（2026-11-28 审查 H3）。
           tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:staging-${{ steps.vars.outputs.version }}
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
           # 关掉 provenance 证明：它会在 manifest list 里塞入 attestation 条目，
           # 某些旧版 Docker（< 25）拉取时会报 unknown/unknown platform。
           # 本项目不依赖该证明，关掉换来更干净的索引。

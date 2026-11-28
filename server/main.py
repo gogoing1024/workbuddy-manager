@@ -18,15 +18,16 @@ from . import config, db, inflight, logsetup, redpacket, security
 from .iputil import client_ip
 from .stdio_utf8 import force_utf8_stdio
 from .routers import (
-    accounts, accountrisk as accountrisk_router, anthropic, auth, balance, gateway, keys, logs, models,
+    accounts, accountrisk as accountrisk_router, anthropic, auth, balance, gateway, keys, logs,
+    maintenance, models,
     playground,
     pgsync as pgsync_router, redpackets, responses, security as security_router,
     proxies, settings, stats, system, tap as tap_router, tokens, upstreams,
     watchdog as watchdog_router,
 )
 from .services import (
-    accountlog, accountrisk, autoupdate, cooling, dailyplan, gatewaycors, modelrecovery, pgsync,
-    renew, tasklog, taskrun, watchdog,
+    accountlog, accountrisk, autoupdate, cooling, dailyplan, dbmaintenance, gatewaycors,
+    modelrecovery, pgsync, renew, speedhealth, tasklog, taskrun, watchdog,
 )
 
 # 最早时刻把标准输出/错误钉成 UTF-8：Windows 中文区域默认按 cp936 编码，日志里
@@ -79,6 +80,10 @@ def _start_services() -> None:
     tasklog.start_collector()
     accountrisk.initialize()
     accountrisk.start()
+    # 数据库周期维护（issue #492）：启动跑一次、之后每 6 小时跑一次。放在
+    # accountrisk.initialize() 之后，确保 account_risk_events 已建表、首轮就能
+    # 清理到它；清理与抓包开关无关，WAL 也会在清理后 TRUNCATE。
+    dbmaintenance.start_scheduler()
     # 定时领奖（成长任务里幂等的那一半）：只把已完成任务的奖励领回来，不伪造
     # 任何活跃上报，因此可以安全地到点自动跑。点亮那半只允许手动（见 taskrun）
     taskrun.start_scheduler()
@@ -89,6 +94,7 @@ def _start_services() -> None:
     # 定时冷却变成永久停用（见 services/cooling.py）。
     cooling.start_scheduler()
     modelrecovery.start_scheduler()
+    speedhealth.start_scheduler()
     # 每日任务计划（签到 / 领奖 / 做任务）：管理端自己的调度器，把「一键」动作
     # 做成每天到点自动跑。默认全部关闭，由用户在账号页显式开启（full 有风控风险）。
     dailyplan.start_scheduler()
@@ -107,12 +113,14 @@ def _start_services() -> None:
 
 
 async def _stop_services() -> None:
+    dbmaintenance.stop_scheduler()
     tasklog.stop_collector()
     accountrisk.stop()
     taskrun.stop_scheduler()
     renew.stop_scheduler()
     cooling.stop_scheduler()
     modelrecovery.stop_scheduler()
+    speedhealth.stop_scheduler()
     dailyplan.stop_scheduler()
     accountlog.stop_collector()
     pgsync.stop_scheduler()
@@ -169,7 +177,7 @@ def _warn_if_exposed() -> None:
 
 app = FastAPI(
     title='WorkBuddy Manager',
-    version='2.11.23',
+    version='2.12.0',
     lifespan=lifespan,
     # 生产环境默认关闭交互式文档与 OpenAPI 描述：
     # 它们会把管理接口全貌（路径、参数、结构）暴露给任何未认证访问者，
@@ -574,6 +582,8 @@ app.include_router(settings.router)
 app.include_router(proxies.router)
 # PostgreSQL 异地备份：把本地数据镜像出去、需要时拉回来（见 services/pgsync）
 app.include_router(pgsync_router.router)
+# 数据库维护（issue #492 第二步）：查看库/WAL 大小与行数、VACUUM INTO 压缩
+app.include_router(maintenance.router)
 app.include_router(watchdog_router.router)
 # 多上游（账号池分组）：密钥绑定上游 = 请求走那个池，见 upstreamsvc
 app.include_router(upstreams.router)

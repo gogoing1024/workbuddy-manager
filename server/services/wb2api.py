@@ -140,6 +140,89 @@ def set_account_weight(filename: str, weight: float,
     return {'file': filename, 'weight': value}
 
 
+def set_account_skip_tasks(filename: str = '', enabled: bool = True,
+                           auth_dir: Path | None = None,
+                           uid: str = '') -> dict:
+    """设置 / 清除账号级「不参与定时任务」开关（issue #437）。
+
+    写入上游 auth 文件顶层 `skip_tasks`（JSON bool）。语义：
+      · true  = 账号仍在号池里照常参与转发，但上游 scheduler 的签到 / 保活 /
+                旅行 / 活跃 / 开学季 / 夜猫子等任务逐号跳过它；
+      · false = 删除该键（缺省 = 参与，与老文件逐字一致）。
+
+    为什么写上游文件而不是本端库：任务挑选发生在上游进程里，它读的是 auth 文件；
+    只存本端库的话上游根本看不到（同权重 / 出口线路的机制）。
+
+    读取—修改—原子写全程加锁（file_lock）：只动 `skip_tasks` 一个键，**其余字段
+    与未知键原样保留**（device_token / proxy / weight / realm 等都不能丢）。
+    文件可以是 `.json` 或面板停用后的 `.json.disabled`；也可只给 uid，由
+    `find_auth_file_for_uid` 找到该账号现有的那份文件。
+    """
+    from .tencent import _atomic_write_json, find_auth_file_for_uid
+
+    if not isinstance(enabled, bool):
+        raise ValueError('enabled 必须是布尔值')
+    base = auth_dir or config.AUTH_DIR
+    name = str(filename or '').strip()
+    wanted_uid = str(uid or '').strip()
+    if name:
+        path = _safe_file(name, base)
+    elif wanted_uid:
+        found = find_auth_file_for_uid(wanted_uid, base)
+        if found is None:
+            raise FileNotFoundError(f'账号不存在：{wanted_uid}')
+        path = found
+    else:
+        raise ValueError('必须提供 file 或 uid')
+    if path.is_symlink():
+        raise ValueError('账号文件不能是符号链接')
+    with file_lock(path):
+        # 乐观并发：上游进程刷新令牌时会用它的 SaveAtomic 重写同一个文件。
+        # file_lock 只覆盖本进程，读—改—写之间仍可能被上游插进一次完整写入；
+        # 若我们拿旧快照直接覆盖，会把刚续期的新 accessToken 盖回旧值。
+        # 写前比较 mtime/size，变了就重读重试（窗口从「读整份文件」缩到
+        # 「stat → rename」的极短一段）。
+        for _ in range(3):
+            stat = path.stat()
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(raw, dict):
+                raise ValueError('账号文件格式异常')
+            current = raw.get('skip_tasks') is True
+            changed = current != enabled
+            if not changed:
+                break
+            if enabled:
+                raw['skip_tasks'] = True
+            else:
+                raw.pop('skip_tasks', None)
+            now_stat = path.stat()
+            if (now_stat.st_mtime_ns, now_stat.st_size) != (stat.st_mtime_ns, stat.st_size):
+                continue        # 别的进程刚写过：重读，别用旧快照覆盖
+            _atomic_write_json(path, raw)
+            break
+        else:
+            raise ValueError('账号文件正在被频繁更新（可能正在续期），请稍后重试')
+    account = raw.get('account') if isinstance(raw.get('account'), dict) else {}
+    return {
+        'file': path.name,
+        'uid': str((account or {}).get('uid') or ''),
+        'skip_tasks': enabled,
+        'changed': changed,
+    }
+
+
+def task_account_files(auth_dir: Path | None = None) -> list[str]:
+    """参与本端定时任务的账号文件名（剔除 skip_tasks 与面板停用）。
+
+    供 taskrun（claim / full 脚本）在「ALL」时构造显式账号列表：上游脚本只会
+    按文件名逐个加载，自己不认 skip_tasks。面板停用的账号（`.json.disabled`）
+    本来就不在上游池里，一并排除。
+    """
+    return [str(a.get('file') or '') for a in list_auth_accounts(auth_dir)
+            if not a.get('skip_tasks') and not a.get('disabled_by_panel')
+            and str(a.get('file') or '').strip()]
+
+
 def _jwt_times(access_token: str) -> tuple[int, int] | None:
     """从 accessToken（JWT）里读出 (iat, exp)。解不出返回 None。
 
@@ -189,6 +272,24 @@ def token_issued_at(access_token: str) -> int | None:
     """
     times = _jwt_times(access_token)
     return times[0] if times else None
+
+
+# 「登录态失效」集合的短缓存：列表页每个账号都会用到它，而它存在 settings 表里；
+# 不缓存就是一次列表请求读一次库。30 秒与其它状态缓存同量级，置位/清除的延迟
+# 对用户不可感知。
+_SESSION_DEAD_CACHE: dict = {'at': 0.0, 'set': set()}
+
+
+def _session_dead_cached() -> set[str]:
+    now = time.time()
+    if now - float(_SESSION_DEAD_CACHE['at']) > 30:
+        try:
+            from .credits import session_dead_uids
+            _SESSION_DEAD_CACHE['set'] = session_dead_uids()
+        except Exception:  # noqa: BLE001
+            _SESSION_DEAD_CACHE['set'] = set()
+        _SESSION_DEAD_CACHE['at'] = now
+    return _SESSION_DEAD_CACHE['set']  # type: ignore[return-value]
 
 
 def list_auth_accounts(auth_dir: Path | None = None) -> list[dict]:
@@ -273,6 +374,11 @@ def list_auth_accounts(auth_dir: Path | None = None) -> list[dict]:
                 # 原样给出，不做钳制——界面要按文件里的真实值回显，
                 # 钳制与默认值只在选号时生效（上游 auth.PickWeight）。
                 'weight': _weight_of(raw),
+                # 账号级「只转发、不跑定时任务」（issue #437）：写在上游 auth 文件
+                # 顶层 skip_tasks。上游 scheduler 的签到/保活/旅行/活跃/开学季/夜猫
+                # 等任务逐号跳过它，但**号池选号不看这个字段**——转发照常。
+                # 只认 JSON true：字符串/数字等非法值不算开启（上游 Parse 也不会认）。
+                'skip_tasks': raw.get('skip_tasks') is True,
                 # 该版本是否支持签到体系（国际版没有，调用方据此跳过而不是打 4xx）
                 # 企业账号（enterpriseId 非空）没有个人成长体系：签到端点恒返回
                 # 400 code=10001「企业账号不支持该操作」（实测 2026-10-18）。
@@ -318,9 +424,18 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         if isinstance(item, dict) and item.get('uid'):
             pool[str(item['uid'])] = item
 
+    dead = _session_dead_cached()
     for a in accounts:
         p = pool.get(a['uid'])
         a['in_pool'] = p is not None
+        # 登录态失效（issue #490）：单独给一个布尔字段，前端据此渲染「需重登」。
+        # 不能只塞中文 invalid_reason —— 前端原来只在「未加载」分支用它，
+        # 池内账号看到的是「在线」+ 积分空白的误导组合。
+        a['needs_relogin'] = a['uid'] in dead
+        if a['needs_relogin']:
+            a['credits'] = None
+            if not a.get('invalid_reason'):
+                a['invalid_reason'] = '登录态失效（被上游作废），需重登'
         if not p:
             # 上游未返回该账号：可能刚添加尚未重载，也可能上游根本没加载成功。
             # 保持其余字段为 None（前端据此单独展示，而不是当成「在线」）。
@@ -333,7 +448,9 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
                 a['invalid_reason'] = '已在本面板临时禁用（不会被上游加载）'
             continue
         credits = p.get('credits')
-        a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
+        # 登录态失效时上游那份 credits 也是旧快照，不能覆盖掉上面刚置的空值。
+        if not a['needs_relogin']:
+            a['credits'] = int(credits) if isinstance(credits, (int, float)) else None
         a['cooling'] = bool(p.get('cooling'))
         # 冷却剩余秒数：上游状态机给的是权威值（可能是它解析出的「上游重置时刻」，
         # 也可能是无时间文案时的有界退避）。展示出来，用户就知道还要等多久，
@@ -1933,24 +2050,6 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             out[key] = _check_int(key, raw)
         elif key in _FLOAT_RANGES:
             out[key] = _check_float(key, raw)
-        elif section == 'prompt' and key == 'mode':
-            mode = str(raw or '').strip().lower()
-            # 取值必须与上游 `normalizePrompt` 的白名单**保持一致**：上游对非法值
-            # 是**启动即报错**（fail fast），所以这里拦不住的话，用户会存进一份让
-            # 上游起不来的配置——表现为「保存成功，然后上游挂了」，比当场报错难查得多。
-            # `append` 是上游 2026-09-17 新增（issue #129）：开头连续 system/developer
-            # 块后插网关 system，既有消息逐字不动。我们此前只认 custom/passthrough，
-            # 会把用户填的合法值拒掉（上游支持、面板说不合法）。
-            if mode not in ('custom', 'append', 'passthrough'):
-                raise ValueError('prompt.mode 只能是 custom、append 或 passthrough')
-            out[key] = mode
-        elif section == 'prompt' and key == 'file':
-            # 路径非空但不可读会让上游启动直接失败（fail fast），
-            # 因此这里做基础合法性检查，并明确提示风险
-            path = str(raw or '').strip()
-            if _has_control_chars(path):
-                raise ValueError('prompt.file 不能包含换行或控制字符')
-            out[key] = path
         elif section == 'admin' and key == 'enabled':
             # 上游对这组配置有 **fail-fast**：`admin.enabled=true` 且 `api_key`
             # 为空时 normalize() 直接返回错误、拒绝启动（其 config.go 原话：
@@ -1969,6 +2068,13 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
                     '开启账号管理接口需要上游已设置 api_key（上游要求管理端点必须鉴权，'
                     '否则拒绝启动）。请先在上游 config.json 里设置 api_key')
             out[key] = bool(raw)
+        elif section == 'upstream' and key == 'ua_style':
+            # 上游对非法值是**启动报错**（normalize 里 switch 只有一个 default
+            # 返回 error），所以这里必须白名单；否则「保存成功、重启后上游起不来」。
+            val = str(raw or '').strip().lower()
+            if val not in ('', 'desktop', 'cli'):
+                raise ValueError('upstream.ua_style 只能是 desktop 或 cli（留空 = desktop）')
+            out[key] = val
         elif section == 'upstream' and key in _UPSTREAM_TEXT_KEYS:
             # 单行文本：UA、客户端版本、用量归知名度、设备 token 文件路径
             val = str(raw or '').strip()
@@ -2045,6 +2151,26 @@ def save_upstream_config(patch: dict) -> dict:
             if clean.pop('__delete__', False):
                 cfg[field].pop('device_token', None)
             cfg[field].update(clean)
+
+    # 提示词段联动校验（issue #498）：custom/append 必须配 prompt.file。
+    # 上游已移除内置人设，file 留空只会回落到一句中性兜底——用户显式选了
+    # custom/append 却没给文件，多半是漏填；静默接受的结果是每条请求的
+    # system 都被换成通用提示词，很难发现。按**落盘后的实际状态**判：
+    # 前端只提交改动字段，单独改 mode 时 file 可能还是旧值，必须合并后再看。
+    #
+    # 只在本次 patch **确实带了 prompt 段**时校验：老配置可能正停在
+    # custom + 空文件（升级前留下的），用户改签到时不该被一个他没碰的字段拦住。
+    if isinstance(patch.get('prompt'), dict):
+        prompt_cfg = cfg.get('prompt')
+        if isinstance(prompt_cfg, dict):
+            mode = str(prompt_cfg.get('mode') or 'passthrough').strip().lower()
+            prompt_file = str(prompt_cfg.get('file') or '').strip()
+            if mode in ('custom', 'append') and not prompt_file:
+                raise ValueError(
+                    f'系统提示词模式选了 {mode}，但「自定义提示词文件」为空：请填写上游容器内'
+                    '可读的文件路径（例如 /app/data/prompt-custom.txt）；不需要自定义提示词'
+                    '请先把模式改回 passthrough'
+                )
 
     # 顶层布尔开关：思考通道兜底（reasoning_as_content）。
     # 它不是任何配置段的成员，所以不能走上面的段循环 —— 塞进段里会写到

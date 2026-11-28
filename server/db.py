@@ -170,6 +170,14 @@ CREATE TABLE IF NOT EXISTS request_logs (
   -- 无法反映上游响应速度；首字延迟才是「上游多久开始回话」。
   -- NULL = 未采集到（非流式请求，或该版本之前的历史记录）。
   first_token_ms    INTEGER,
+  -- 首帧延迟（毫秒）：上游第一个**带负载的 `data:` 帧**到达时刻，不区分
+  -- role/推理/正文。保活注释帧（`: keepalive`）与 `data: [DONE]` 都不算 ——
+  -- 把保活算进来会让这个数字退化成建连延迟（见 gateway._has_data_frame）。
+  -- 与 first_token_ms 的区别：后者要等到首个含正文或推理的 delta，max 档下
+  -- 推理阶段很长时两者能差上百秒。对齐上游 TTFB、判断「排队/建连」快慢要看
+  -- 这一列。NULL = 未采集（非流式、只有保活与 [DONE] 的空流，或本列上线前的
+  -- 历史记录）。
+  first_frame_ms    INTEGER,
   ua                TEXT,
   error             TEXT,
   stream            INTEGER DEFAULT 0,
@@ -628,15 +636,45 @@ def _explain_db_open_failure(exc: Exception) -> str:
     return '\n'.join(lines)
 
 
+def _recover_interrupted_swap() -> None:
+    """启动时恢复「替换数据库」中断留下的现场。
+
+    `replace_database()` 是两次 rename：`target → .swap-old`、`staging → target`。
+    进程在两步之间被 kill / OOM / 断电时，`target` 不存在而 `.swap-old` 是最后
+    一份完整数据。以前只有再次调用 `replace_database()` 才会走恢复分支；正常
+    启动的 `connect()` 会直接建一个空库，用户看到「数据全没了」。
+
+    这里在打开连接前把 `.swap-old` 放回正式位置。若两者都在，说明第二次
+    rename 已完成，旧文件只是没来得及删，留给 connect() 成功后再清理。
+    """
+    target = Path(config.DB_PATH)
+    old = Path(str(target) + '.swap-old')
+    try:
+        if not target.exists() and old.exists():
+            os.replace(old, target)
+    except OSError:
+        # 恢复失败时不要阻断启动：下面 sqlite3.connect 会给出更具体的错误。
+        pass
+
+
 def connect() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         config.ensure_dirs()
+        # 上次替换在「旧库改名 → 新库就位」之间崩溃时，正式库文件不存在，
+        # 最后一份完整数据在 .swap-old。这里必须先恢复，否则 sqlite3.connect
+        # 会新建一个空库，原数据静默留在残骸里（安全审查 2026-11-28）。
+        _recover_interrupted_swap()
         try:
             _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
             _conn.row_factory = sqlite3.Row
             _conn.execute('PRAGMA journal_mode=WAL')
             _conn.execute('PRAGMA synchronous=NORMAL')
+            # WAL 单文件上限（issue #492）：大 DELETE 后不会自动缩文件，但 checkpoint
+            # 时超过这个上限的 `-wal` 会被截断，避免长期运行后伴生文件无限增长。
+            # 用拼接而不是参数绑定：SQLite 的 PRAGMA 不接受占位符；此处值来自
+            # config 的整数解析，不可能是外部字符串。
+            _conn.execute(f'PRAGMA journal_size_limit={int(config.JOURNAL_SIZE_LIMIT)}')
             _conn.executescript(SCHEMA)
             _migrate(_conn)
         except sqlite3.OperationalError as exc:
@@ -658,6 +696,14 @@ def connect() -> sqlite3.Connection:
         ensure_hourly_today()
         # 启动时也清一次侧表：低流量部署可能很久攒不够触发周期清理的写入量。
         _prune_side_tables()
+        # 新库已确认可打开：上一次替换留下的 .swap-old 只是没删掉的旧副本。
+        # 放在所有初始化成功之后才删——中途失败时它还是唯一的回滚副本。
+        try:
+            Path(str(config.DB_PATH) + '.swap-old').unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
     return _conn
 
 
@@ -778,6 +824,8 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ('usage_daily', 'credit', 'REAL NOT NULL DEFAULT 0'),
     # 首字延迟：可空（历史记录与非流式请求为 NULL）
     ('request_logs', 'first_token_ms', 'INTEGER'),
+    # 首帧延迟：可空（同上）。与 first_token_ms 分开存，见建表注释。
+    ('request_logs', 'first_frame_ms', 'INTEGER'),
     # 版本（cn / global）：界面按版本切换时日志与统计要跟着切。
     # 历史记录为 NULL —— 读的时候按 cn 归类（见 realm_of_model 的注释）。
     ('request_logs', 'realm', 'TEXT'),
@@ -1396,6 +1444,30 @@ def add_task_logs(entries: list[dict]) -> int:
         return conn.total_changes - before
 
 
+def existing_task_log_keys(keys: list[str]) -> set[str]:
+    """返回 `keys` 中**已经存在**于 task_logs 的 dedup_key 集合。
+
+    采集器需要区分「这一批里哪些是新增行」：只有新增行才该交给预警分类器
+    （issue #405 —— 容器日志尾部 3000 行里的历史失败行如果每 30 秒重放一次，
+    用户确认/删除后预警都会「复活」）。dedup_key 是 UNIQUE，按批 IN 查询很轻。
+    """
+    wanted = [str(k) for k in keys if str(k or '')]
+    if not wanted:
+        return set()
+    out: set[str] = set()
+    with _lock:
+        conn = connect()
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i:i + 500]
+            placeholders = ','.join('?' * len(chunk))
+            rows = conn.execute(
+                f'SELECT dedup_key FROM task_logs WHERE dedup_key IN ({placeholders})',
+                chunk,
+            ).fetchall()
+            out.update(str(r[0]) for r in rows)
+    return out
+
+
 def _clean(text: object, limit: int = 500) -> str:
     """把外部文本清成单行：去控制字符并截断。
 
@@ -1451,7 +1523,8 @@ _ip_log_writes = 0
 # 每天 1400+ 行。此前没有任何清理机制——`ip_access_logs` 有行数上限，它没有。
 # 按当前速率一年约 50 万行、上百 MB，`/api/logs` 的查询与页面都会越来越慢。
 #
-# 取 90 天：统计页最长的展示窗口是 30 天（`_DAYS_MAX` 之外的实际用法），
+# 取 90 天（部署层可用 WB_REQUEST_LOG_RETENTION_DAYS 覆盖，0 = 永久保留）：
+# 统计页最长的展示窗口是 30 天（`_DAYS_MAX` 之外的实际用法），
 # 「修复统计 / 重建统计」也只需覆盖到用量表还有意义的时段；再久的明细对用户
 # 没有用途，而按月归档属于另一件事（真要长期留存应导出，不是留在大表里）。
 #
@@ -1459,6 +1532,43 @@ _ip_log_writes = 0
 # 删掉 90 天前的日志后，那段时期的用量统计**不能再重建**（现有数据不受影响，
 # 只是无法重算）。这是刻意的：90 天前的用量早已定稿，不值得为它永久保留明细。
 _REQUEST_LOG_RETAIN_DAYS = 90
+# 实际取值以 config 为准（issue #492）：环境变量可在部署层覆盖，0 = 永久保留。
+# 保留上面的常量作为兼容/测试默认值，不在 import 时把环境值冻结进 db 模块。
+def _request_log_retention_days() -> int:
+    days = getattr(config, 'REQUEST_LOG_RETENTION_DAYS', _REQUEST_LOG_RETAIN_DAYS)
+    try:
+        return max(0, int(days))
+    except (TypeError, ValueError):
+        return _REQUEST_LOG_RETAIN_DAYS
+
+
+# 允许维护任务按 ts 清理的表。表名无法用占位符绑定，所以必须白名单；
+# 新增一张表的保留策略时，这里也要显式加一行。
+_PRUNE_TARGETS = frozenset({'request_logs', 'checkin_logs', 'account_risk_events'})
+
+
+def prune_older_than(table: str, cutoff: int) -> int:
+    """删除 ``table`` 中 ``ts < cutoff`` 的行，返回删除条数（issue #492）。
+
+    与 `execute()` 不同，它返回 rowcount：维护任务需要把「清了多少」写进日志，
+    而 `execute()` 返回的是 lastrowid（DELETE 恒为 0）。
+    """
+    if table not in _PRUNE_TARGETS:
+        raise ValueError(f'不允许清理的表：{table}')
+    with _lock:
+        conn = connect()
+        try:
+            cur = conn.execute(f'DELETE FROM {table} WHERE ts < ?', (int(cutoff),))
+        except Exception:
+            # 同 execute()：失败必须回滚，否则写锁会一直挂在共享连接上。
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+        conn.commit()
+        return int(cur.rowcount)
+
 
 # 清理间隔：按行数触发（每 2000 次写入检查一次），与 ip 日志同款思路——
 # 不必每次写入都查一次。检查本身用索引列 ts，成本可忽略。
@@ -1486,33 +1596,44 @@ def _prune_side_tables() -> None:
     hourly_cutoff = time.strftime('%Y-%m-%d',
                                   time.localtime(now - _HOURLY_RETAIN_DAYS * 86400))
     task_cutoff = now - _TASK_LOG_RETAIN_DAYS * 86400
-    for sql, args in (
+    targets = [
         ('DELETE FROM usage_hourly WHERE day < ?', (hourly_cutoff,)),
         ('DELETE FROM task_logs WHERE ts < ?', (task_cutoff,)),
-        ('DELETE FROM request_account_matches WHERE ts < ?',
-         (now - _REQUEST_LOG_RETAIN_DAYS * 86400,)),
         # 保留最新 N 行：删除 id <= 第 N+1 新那行的 id；不足 N 行时子查询为 NULL，
         # `id <= NULL` 不成立，什么都不会删。
         ('DELETE FROM audit_logs WHERE id <= (SELECT id FROM audit_logs '
          'ORDER BY id DESC LIMIT 1 OFFSET ?)', (_AUDIT_LOG_MAX_ROWS,)),
-    ):
+    ]
+    # request_account_matches 跟随请求日志的保留期；请求日志设为「永久」时
+    # 匹配消费记录也不能先被清掉（否则同一上游事件可能被重新分配）。
+    req_days = _request_log_retention_days()
+    if req_days > 0:
+        targets.insert(2, ('DELETE FROM request_account_matches WHERE ts < ?',
+                           (now - req_days * 86400,)))
+    for sql, args in targets:
         try:
             execute(sql, args)
         except Exception:  # noqa: BLE001
             pass
 
 
-def _prune_request_logs() -> None:
+def _prune_request_logs(retention_days: int | None = None) -> int:
     """按保留期清理请求日志（滚动删除最旧的），顺手清理侧表。
 
     旁路操作：任何失败都不能影响写入本身（更不能影响转发）。
+    返回真正删除的行数；``0 = 永久保留`` 时跳过时间清理，但侧表上限照常执行。
     """
-    cutoff = int(time.time()) - _REQUEST_LOG_RETAIN_DAYS * 86400
-    try:
-        execute('DELETE FROM request_logs WHERE ts < ?', (cutoff,))
-    except Exception:  # noqa: BLE001
-        pass
+    days = (_request_log_retention_days() if retention_days is None
+            else max(0, int(retention_days)))
+    removed = 0
+    if days > 0:
+        try:
+            removed = prune_older_than(
+                'request_logs', int(time.time()) - days * 86400)
+        except Exception:  # noqa: BLE001
+            pass
     _prune_side_tables()
+    return removed
 
 
 def add_request_log(**fields: object) -> None:
@@ -1535,14 +1656,15 @@ def add_request_log(**fields: object) -> None:
                               fields.get('ts'))
     execute(
         'INSERT INTO request_logs(ts, key_id, ip, model, mapped_model, status, '
-        'prompt_tokens, completion_tokens, latency_ms, first_token_ms, ua, error, '
+        'prompt_tokens, completion_tokens, latency_ms, first_token_ms, first_frame_ms, ua, error, '
         'stream, credit, realm, account, cache_hit_tokens, cache_miss_tokens, '
         'cache_write_tokens, effort, channel, cost, account_expected) '
-        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (fields.get('ts'), fields.get('key_id'), fields.get('ip'),
          fields.get('model'), fields.get('mapped_model'), fields.get('status'),
          fields.get('prompt_tokens'), fields.get('completion_tokens'),
-         fields.get('latency_ms'), fields.get('first_token_ms'), fields.get('ua'),
+         fields.get('latency_ms'), fields.get('first_token_ms'),
+         fields.get('first_frame_ms'), fields.get('ua'),
          fields.get('error'), fields.get('stream'), fields.get('credit'),
          fields.get('realm'), fields.get('account'), fields.get('cache_hit_tokens'),
          fields.get('cache_miss_tokens'), fields.get('cache_write_tokens'),
